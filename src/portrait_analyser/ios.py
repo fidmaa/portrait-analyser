@@ -1,4 +1,5 @@
 from io import BytesIO
+from typing import List, Tuple
 
 import piexif
 import pyheif
@@ -10,6 +11,7 @@ from .exceptions import ExifValidationFailed, NoDepthMapFound, UnknownExtension
 
 class IOSImage:
     # Adapted from https://github.com/lyangas/depthmap_from_jpeg/tree/master
+    # Class for opening JPEGs with depth information, for iPhone X/Xs
 
     def __init__(self, file_name):
         # every layer starts with 0xff, 0xd8 bytes and ends with 0xff, 0xd9
@@ -72,7 +74,11 @@ class IOSImage:
         return depthmap
 
 
-def load_image(fileName: str):
+def load_image(fileName: str) -> Tuple[Image]:
+    """
+    Load HEIF or JPEG with depth data,
+    return tuple of (image, depth)
+    """
     if fileName.lower().endswith("heic") or fileName.lower().endswith("heif"):
         #
         # Get depth map from HEIC/HEIF container, then proceed normally:
@@ -93,7 +99,14 @@ def load_image(fileName: str):
             raise NoDepthMapFound(f"{fileName} has no depth data")
 
         depth_image = primary_image.depth_image.image.load()
+        depth_image = Image.frombytes(depth_image.mode, depth_image.size, depth_image.data)
+
         picture_image = primary_image.image.load()
+        picture_image = Image.frombytes(
+            picture_image.mode,
+            (picture_image.size[0] + 4, picture_image.size[1] - 1),
+            picture_image.data,
+        )
 
         return (picture_image, depth_image)
 

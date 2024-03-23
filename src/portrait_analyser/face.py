@@ -5,18 +5,11 @@ from PIL import Image
 from .exceptions import MultipleFacesDetected, NoFacesDetected
 
 
-def get_face_parameters(image):
-    #
-    # Guess face position
-    #
+def get_face_parameters(input_image: Image):
+    """Get face position and size or return an exception in
+    case there's none."""
 
-    input_image = Image.frombytes(
-        image.mode,
-        (image.size[0] + 4, image.size[1] - 1),
-        image.data,
-    )
-
-    image = numpy.array(input_image.convert("RGB"))
+    image = numpy.asarray(input_image.convert("RGB"))
 
     face_cascade = cv2.CascadeClassifier(
         cv2.data.haarcascades + "haarcascade_frontalface_alt.xml"

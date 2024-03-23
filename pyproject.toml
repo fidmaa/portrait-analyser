@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "portrait-analyser"
-version = "0.1.0"
+version = "0.1.1"
 description = "Python module for portrait picture analysis"
 authors = ["Michał Pasternak <michal.dtz@gmail.com>"]
 license = "MIT"
