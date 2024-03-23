@@ -22,7 +22,9 @@ jobs:
       - name: Install dependencies
         run: python -m pip install poetry
       - name: Install apt dependencies
-        run: apt update && apt install libffi libheif-dev libde265-dev
+        run: sudo apt update
+      - name: Install apt deps
+        run: sudo apt install libffi libheif-dev libde265-dev
       - name: Install dependencies
         run: poetry install 
       - name: Run tests
