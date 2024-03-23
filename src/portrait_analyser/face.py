@@ -1,16 +1,14 @@
 import cv2
 import numpy
 from PIL import Image
-from pyheif import HeifImage
 
 from .exceptions import MultipleFacesDetected, NoFacesDetected
 
 
-def get_face_parameters(image: HeifImage):
+def get_face_parameters(image):
     #
     # Guess face position
     #
-    #    image = numpy.array(self.image.convert("RGB"))
 
     input_image = Image.frombytes(
         image.mode,
