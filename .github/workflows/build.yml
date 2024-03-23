@@ -24,7 +24,7 @@ jobs:
       - name: Install apt dependencies
         run: sudo apt update
       - name: Install apt deps
-        run: sudo apt install libffi libheif-dev libde265-dev
+        run: sudo apt install libheif-dev libde265-dev
       - name: Install dependencies
         run: poetry install 
       - name: Run tests
