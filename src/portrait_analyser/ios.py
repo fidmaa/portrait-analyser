@@ -102,11 +102,21 @@ def load_image(fileName: str) -> Tuple[Image]:
         depth_image = Image.frombytes(depth_image.mode, depth_image.size, depth_image.data)
 
         picture_image = primary_image.image.load()
-        picture_image = Image.frombytes(
-            picture_image.mode,
-            (picture_image.size[0] + 4, picture_image.size[1] - 1),
-            picture_image.data,
-        )
+        try:
+            # iPhone 14
+            picture_image = Image.frombytes(
+                picture_image.mode,
+                (picture_image.size[0] + 4, picture_image.size[1] - 1),
+                picture_image.data,
+            )
+        except ValueError:
+            # iPhone 12; probably flagged somewhere in the image; no idea, will just
+            # leave this as-is. 
+            picture_image = Image.frombytes(
+                picture_image.mode,
+                (picture_image.size[0], picture_image.size[1]),
+                picture_image.data,
+            )
 
         return (picture_image, depth_image)
 
