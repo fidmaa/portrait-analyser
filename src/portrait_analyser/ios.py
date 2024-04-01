@@ -2,12 +2,12 @@ from typing import Union
 
 import piexif
 import pyheif
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageOps
 from pyheif import UndecodedHeifImage
 
 from . import const
 from .exceptions import ExifValidationFailed, NoDepthMapFound, UnknownExtension
-from .face import find_bounding_box_teeth
+from .face import find_bounding_box_teeth, find_incisor_distance_teeth
 
 
 class IOSPortrait:
@@ -16,12 +16,15 @@ class IOSPortrait:
         photo,
         depthmap=None,
         teethmap=None,
+        skinmap=None,
         floatValueMin=None,
         floatValueMax=None,
     ):
         self.photo = photo
         self.depthmap = depthmap
         self.teethmap = teethmap
+        self.incisor_distance = None
+        self.teeth_bbox = None
 
         self.floatValueMin = floatValueMin
         self.floatValueMax = floatValueMax
@@ -32,15 +35,28 @@ class IOSPortrait:
         if self.floatValueMax is not None:
             self.floatValueMax = float(self.floatValueMax)
 
-        self.teeth_bbox = None
         if self.teethmap:
             self.teethmap = ImageOps.mirror(self.teethmap)
             self.teethmap = self.teethmap.resize(self.photo.size)
-            ret = find_bounding_box_teeth(
-                self.teethmap.filter(ImageFilter.MaxFilter(size=13))
-            )
+            ret = find_bounding_box_teeth(self.teethmap)
             if ret is not None:
                 self.teeth_bbox = ret
+
+                self.incisor_distance = find_incisor_distance_teeth(
+                    self.teethmap, self.teeth_bbox
+                )
+                print("ID", self.incisor_distance)
+
+        self.skinmap = skinmap
+        if self.skinmap:
+            # WARNING: some code assumes later skinmap is the same size as
+            # photo
+            self.skinmap = self.skinmap.resize(self.photo.size)
+
+            # for y in range(self.skinmap.size[1]):
+            #     for x in range(self.skinmap.size[0]):
+            #         if self.skinmap.getpixel((x, y)) > 0:
+            #             self.skinmap.putpixel((x, y), 255)
 
     def teeth_bbox_translated(self, max_wi, max_he):
         if self.teeth_bbox is None:
@@ -78,14 +94,18 @@ def load_image(fileName: str) -> Union[IOSPortrait, None]:
         if primary_image.depth_image is None:
             raise NoDepthMapFound(f"{fileName} has no depth data")
 
-        teeth_image = None
+        teeth_image = skin_image = None
         for looking_for in primary_image.auxiliary_images:
             if (
                 getattr(looking_for, "type", "")
                 == "urn:com:apple:photo:2019:aux:semanticteethmatte"
             ):
-                teeth_image = looking_for.image  # .load()
-                break
+                teeth_image = looking_for.image
+            elif (
+                getattr(looking_for, "type", "")
+                == "urn:com:apple:photo:2019:aux:semanticskinmatte"
+            ):
+                skin_image = looking_for.image
 
         depth_image = primary_image.depth_image.image.load()
         ret = {}
@@ -146,14 +166,22 @@ def load_image(fileName: str) -> Union[IOSPortrait, None]:
                     teeth_image.data,
                 )
             )
-            # teeth_image = teeth_image.scale(self.photo.size)
+
+        if skin_image:
+            skin_image = skin_image.load()
+            skin_image = Image.frombytes(
+                "L",
+                (skin_image.size[0] * 3 + 14, skin_image.size[1] - 1),
+                skin_image.data,
+            )
 
         return IOSPortrait(
-            picture_image,
-            depth_image,
-            teeth_image,
-            float_min_value,
-            float_max_value,
+            photo=picture_image,
+            depthmap=depth_image,
+            teethmap=teeth_image,
+            skinmap=skin_image,
+            floatValueMin=float_min_value,
+            floatValueMax=float_max_value,
         )
 
     else:
