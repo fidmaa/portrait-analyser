@@ -124,7 +124,6 @@ class Face(Rectangle):
         self.eyes = []
         # draw a rectangle around eyes
         for ex, ey, ew, eh in eyes:
-            # eye_image = gray[ey : ey + eh - 1, ex : ex + ew - 1].copy()
             self.eyes.append(Eye(self, ex, ey, ew, eh))
 
 
@@ -136,8 +135,8 @@ def get_face_parameters(input_image: Image, raise_opencv_exceptions=False):
     image = Image_to_cv2(input_image)
 
     try:
-        face = face_cascade.detectMultiScale(image, scaleFactor=1.3, minNeighbors=4)
-    except BaseException as e:
+        face = face_cascade.detectMultiScale(image, scaleFactor=1.3, minNeighbors=5)
+    except Exception as e:
         if raise_opencv_exceptions:
             raise e
         face = []
@@ -183,7 +182,6 @@ def find_neck_measurement_point(skinmap, face_location, threshold=200):
         distance = end_x - start_x
         if results:
             if distance > results[-1][0]:
-                print("Distance starts to grow, exiting at y = ", str(y))
                 break
 
         results.append((distance, y, start_x, end_x))

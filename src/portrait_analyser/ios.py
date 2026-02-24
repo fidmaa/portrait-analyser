@@ -1,9 +1,9 @@
+import xml.etree.ElementTree as ET
 from typing import Union
 
 import piexif
 import pyheif
-from PIL import Image, ImageOps
-from pyheif import UndecodedHeifImage
+from PIL import Image
 
 from . import const
 from .exceptions import ExifValidationFailed, NoDepthMapFound, UnknownExtension
@@ -19,44 +19,17 @@ class IOSPortrait:
         skinmap=None,
         floatValueMin=None,
         floatValueMax=None,
+        teeth_bbox=None,
+        incisor_distance=None,
     ):
         self.photo = photo
         self.depthmap = depthmap
         self.teethmap = teethmap
-        self.incisor_distance = None
-        self.teeth_bbox = None
-
-        self.floatValueMin = floatValueMin
-        self.floatValueMax = floatValueMax
-
-        if self.floatValueMin is not None:
-            self.floatValueMin = float(self.floatValueMin)
-
-        if self.floatValueMax is not None:
-            self.floatValueMax = float(self.floatValueMax)
-
-        if self.teethmap:
-            self.teethmap = ImageOps.mirror(self.teethmap)
-            self.teethmap = self.teethmap.resize(self.photo.size)
-            ret = find_bounding_box_teeth(self.teethmap)
-            if ret is not None:
-                self.teeth_bbox = ret
-
-                self.incisor_distance = find_incisor_distance_teeth(
-                    self.teethmap, self.teeth_bbox
-                )
-                print("ID", self.incisor_distance)
-
         self.skinmap = skinmap
-        if self.skinmap:
-            # WARNING: some code assumes later skinmap is the same size as
-            # photo
-            self.skinmap = self.skinmap.resize(self.photo.size)
-
-            # for y in range(self.skinmap.size[1]):
-            #     for x in range(self.skinmap.size[0]):
-            #         if self.skinmap.getpixel((x, y)) > 0:
-            #             self.skinmap.putpixel((x, y), 255)
+        self.teeth_bbox = teeth_bbox
+        self.incisor_distance = incisor_distance
+        self.floatValueMin = float(floatValueMin) if floatValueMin is not None else None
+        self.floatValueMax = float(floatValueMax) if floatValueMax is not None else None
 
     def teeth_bbox_translated(self, max_wi, max_he):
         if self.teeth_bbox is None:
@@ -70,132 +43,130 @@ class IOSPortrait:
         )
 
 
+def _validate_exif(primary_image, use_exif):
+    """Extract and validate TrueDepth EXIF metadata."""
+    for exif_metadata in [
+        metadata
+        for metadata in primary_image.image.load().metadata
+        if metadata.get("type", "") == "Exif"
+    ]:
+        exif = piexif.load(exif_metadata["data"])
+        if use_exif:
+            check_exif_data(exif)
+
+
+def _parse_depth_metadata(depth_image):
+    """Parse XML metadata from depth image for float min/max values."""
+    ret = {}
+    if depth_image.metadata:
+        for metadata in depth_image.metadata:
+            if metadata.get("type", "") == "mime":
+                root = ET.fromstring(metadata.get("data"))
+                for elem in root[0][0]:
+                    ret[elem.tag] = elem.text
+
+    float_min = ret.get(
+        "{http://ns.apple.com/pixeldatainfo/1.0/}FloatMinValue", 0.0
+    )
+    float_max = ret.get(
+        "{http://ns.apple.com/pixeldatainfo/1.0/}FloatMaxValue", 0.0
+    )
+    return float_min, float_max
+
+
+def _decode_picture(raw_image):
+    """Decode primary picture with device-specific dimension correction."""
+    try:
+        # iPhone 14
+        return Image.frombytes(
+            raw_image.mode,
+            (raw_image.size[0] + 4, raw_image.size[1] - 1),
+            raw_image.data,
+        )
+    except ValueError:
+        # iPhone 12
+        return Image.frombytes(
+            raw_image.mode,
+            (raw_image.size[0], raw_image.size[1]),
+            raw_image.data,
+        )
+
+
+def _decode_semantic_map(raw_image):
+    """Decode a semantic segmentation map (teeth/skin) using the Apple format."""
+    loaded = raw_image.load()
+    try:
+        return Image.frombytes(
+            "L",
+            (loaded.size[0] * 3 + 14, loaded.size[1] - 1),
+            loaded.data,
+        )
+    except ValueError:
+        return None
+
+
 def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
-    """
-    Load HEIF or JPEG with depth data,
-    return tuple of (image, depth)
-    """
-    if fileName.lower().endswith("heic") or fileName.lower().endswith("heif"):
-        #
-        # Get depth map from HEIC/HEIF container, then proceed normally:
-        #
-        heif_container = pyheif.open_container(open(fileName, "rb"))
+    """Load HEIC/HEIF with depth data, return an IOSPortrait instance."""
+    if not (fileName.lower().endswith("heic") or fileName.lower().endswith("heif")):
+        raise UnknownExtension(
+            "only supported extensions for filenames are: HEIF, HEIC"
+        )
+
+    with open(fileName, "rb") as f:
+        heif_container = pyheif.open_container(f)
 
         primary_image = heif_container.primary_image
-
-        for exif_metadata in [
-            metadata
-            for metadata in primary_image.image.load().metadata
-            if metadata.get("type", "") == "Exif"
-        ]:
-            exif = piexif.load(exif_metadata["data"])
-            if use_exif:
-                check_exif_data(exif)
+        _validate_exif(primary_image, use_exif)
 
         if primary_image.depth_image is None:
             raise NoDepthMapFound(f"{fileName} has no depth data")
 
-        teeth_image = skin_image = None
-        for looking_for in primary_image.auxiliary_images:
-            if (
-                getattr(looking_for, "type", "")
-                == "urn:com:apple:photo:2019:aux:semanticteethmatte"
-            ):
-                teeth_image = looking_for.image
-            elif (
-                getattr(looking_for, "type", "")
-                == "urn:com:apple:photo:2019:aux:semanticskinmatte"
-            ):
-                skin_image = looking_for.image
+        # Extract auxiliary semantic maps
+        teeth_raw = skin_raw = None
+        for aux in primary_image.auxiliary_images:
+            aux_type = getattr(aux, "type", "")
+            if aux_type == "urn:com:apple:photo:2019:aux:semanticteethmatte":
+                teeth_raw = aux.image
+            elif aux_type == "urn:com:apple:photo:2019:aux:semanticskinmatte":
+                skin_raw = aux.image
 
-        depth_image = primary_image.depth_image.image.load()
-        ret = {}
-        if depth_image.metadata:
-            for metadata in depth_image.metadata:
-                if metadata.get("type", "") == "mime":
-                    import xml.etree.ElementTree as ET
-
-                    root = ET.fromstring(metadata.get("data"))
-                    for elem in root[0][0]:
-                        ret[elem.tag] = elem.text
-
-        float_min_value = ret.get(
-            "{http://ns.apple.com/pixeldatainfo/1.0/}FloatMinValue", 0.0
-        )
-
-        float_max_value = ret.get(
-            "{http://ns.apple.com/pixeldatainfo/1.0/}FloatMaxValue", 0.0
-        )
-
+        # Decode depth map
+        depth_loaded = primary_image.depth_image.image.load()
+        float_min, float_max = _parse_depth_metadata(depth_loaded)
         depth_image = Image.frombytes(
-            depth_image.mode, depth_image.size, depth_image.data
+            depth_loaded.mode, depth_loaded.size, depth_loaded.data
         )
 
-        picture_image = primary_image.image.load()
-        try:
-            # iPhone 14
-            picture_image = Image.frombytes(
-                picture_image.mode,
-                (picture_image.size[0] + 4, picture_image.size[1] - 1),
-                picture_image.data,
-            )
-        except ValueError:
-            # iPhone 12; probably flagged somewhere in the image; no idea, will just
-            # leave this as-is.
-            picture_image = Image.frombytes(
-                picture_image.mode,
-                (picture_image.size[0], picture_image.size[1]),
-                picture_image.data,
-            )
-        #     int aux_bit_depth = heif_image_handle_get_luma_bits_per_pixel(aux_handle);
-        #
-        #             struct heif_image* aux_image;
-        #             err = heif_decode_image(aux_handle,
-        #                                     &aux_image,
-        #                                     encoder->colorspace(false),
-        #                                     encoder->chroma(false, aux_bit_depth),
-        #                                     nullptr);
+        # Decode primary picture
+        picture_image = _decode_picture(primary_image.image.load())
 
-        if teeth_image:
-            teeth_image: UndecodedHeifImage
+        # Decode semantic maps
+        teeth_image = _decode_semantic_map(teeth_raw) if teeth_raw else None
+        skin_image = _decode_semantic_map(skin_raw) if skin_raw else None
 
-            teeth_image = teeth_image.load()
+    # Process teeth map: resize and analyze
+    teeth_bbox = None
+    incisor_distance = None
+    if teeth_image is not None:
+        teeth_image = teeth_image.resize(picture_image.size)
+        teeth_bbox = find_bounding_box_teeth(teeth_image)
+        if teeth_bbox is not None:
+            incisor_distance = find_incisor_distance_teeth(teeth_image, teeth_bbox)
 
-            try:
-                teeth_image = ImageOps.mirror(
-                    Image.frombytes(
-                        "L",
-                        (teeth_image.size[0] * 3 + 14, teeth_image.size[1] - 1),
-                        teeth_image.data,
-                    )
-                )
-            except ValueError:
-                teeth_image = None
+    # Process skin map: resize
+    if skin_image is not None:
+        skin_image = skin_image.resize(picture_image.size)
 
-        if skin_image:
-            skin_image = skin_image.load()
-            try:
-                skin_image = Image.frombytes(
-                    "L",
-                    (skin_image.size[0] * 3 + 14, skin_image.size[1] - 1),
-                    skin_image.data,
-                )
-            except ValueError:
-                skin_image = None
-
-        return IOSPortrait(
-            photo=picture_image,
-            depthmap=depth_image,
-            teethmap=teeth_image,
-            skinmap=skin_image,
-            floatValueMin=float_min_value,
-            floatValueMax=float_max_value,
-        )
-
-    else:
-        raise UnknownExtension(
-            "only supported extensions for filenames are: HEIF, HEIC"
-        )
+    return IOSPortrait(
+        photo=picture_image,
+        depthmap=depth_image,
+        teethmap=teeth_image,
+        skinmap=skin_image,
+        floatValueMin=float_min,
+        floatValueMax=float_max,
+        teeth_bbox=teeth_bbox,
+        incisor_distance=incisor_distance,
+    )
 
 
 def check_exif_data(exif):
@@ -210,7 +181,7 @@ def check_exif_data(exif):
         ret = data.find(const.TRUEDEPTH_EXIF_ID.encode("ascii"))
         try:
             reason = data.decode("ascii")
-        except BaseException:
+        except Exception:
             reason = "cannot encode"
     else:
         ret = -1
