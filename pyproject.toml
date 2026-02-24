@@ -1,6 +1,6 @@
 [project]
 name = "portrait-analyser"
-version = "0.1.2"
+version = "0.2.0"
 description = "Python module for portrait picture analysis"
 authors = [
     {name = "Michał Pasternak", email = "michal.dtz@gmail.com"},
