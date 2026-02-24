@@ -70,7 +70,7 @@ class IOSPortrait:
         )
 
 
-def load_image(fileName: str) -> Union[IOSPortrait, None]:
+def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
     """
     Load HEIF or JPEG with depth data,
     return tuple of (image, depth)
@@ -89,7 +89,8 @@ def load_image(fileName: str) -> Union[IOSPortrait, None]:
             if metadata.get("type", "") == "Exif"
         ]:
             exif = piexif.load(exif_metadata["data"])
-            check_exif_data(exif)
+            if use_exif:
+                check_exif_data(exif)
 
         if primary_image.depth_image is None:
             raise NoDepthMapFound(f"{fileName} has no depth data")
@@ -159,21 +160,28 @@ def load_image(fileName: str) -> Union[IOSPortrait, None]:
             teeth_image: UndecodedHeifImage
 
             teeth_image = teeth_image.load()
-            teeth_image = ImageOps.mirror(
-                Image.frombytes(
-                    "L",
-                    (teeth_image.size[0] * 3 + 14, teeth_image.size[1] - 1),
-                    teeth_image.data,
+
+            try:
+                teeth_image = ImageOps.mirror(
+                    Image.frombytes(
+                        "L",
+                        (teeth_image.size[0] * 3 + 14, teeth_image.size[1] - 1),
+                        teeth_image.data,
+                    )
                 )
-            )
+            except ValueError:
+                teeth_image = None
 
         if skin_image:
             skin_image = skin_image.load()
-            skin_image = Image.frombytes(
-                "L",
-                (skin_image.size[0] * 3 + 14, skin_image.size[1] - 1),
-                skin_image.data,
-            )
+            try:
+                skin_image = Image.frombytes(
+                    "L",
+                    (skin_image.size[0] * 3 + 14, skin_image.size[1] - 1),
+                    skin_image.data,
+                )
+            except ValueError:
+                skin_image = None
 
         return IOSPortrait(
             photo=picture_image,
