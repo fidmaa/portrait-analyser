@@ -1,6 +1,6 @@
 [project]
 name = "portrait-analyser"
-version = "0.2.0"
+version = "0.3.0"
 description = "Python module for portrait picture analysis"
 authors = [
     {name = "Michał Pasternak", email = "michal.dtz@gmail.com"},
@@ -21,6 +21,9 @@ dependencies = [
 dev = [
     "pytest>=8.1.1",
 ]
+
+[project.scripts]
+analyse-portrait = "portrait_analyser.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

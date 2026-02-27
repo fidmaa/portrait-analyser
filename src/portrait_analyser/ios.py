@@ -7,7 +7,14 @@ from PIL import Image
 
 from . import const
 from .exceptions import ExifValidationFailed, NoDepthMapFound, UnknownExtension
-from .face import find_bounding_box_teeth, find_incisor_distance_teeth
+from .face import (
+    find_bounding_box_teeth,
+    find_incisor_centroids,
+    find_incisor_distance_teeth,
+    IncisorMeasurement,
+    sample_depth_at_point,
+)
+from .incisor import compute_incisor_distance_3d
 
 
 class IOSPortrait:
@@ -21,6 +28,8 @@ class IOSPortrait:
         floatValueMax=None,
         teeth_bbox=None,
         incisor_distance=None,
+        incisor_distance_3d_mm=None,
+        incisor_measurement=None,
     ):
         self.photo = photo
         self.depthmap = depthmap
@@ -28,6 +37,8 @@ class IOSPortrait:
         self.skinmap = skinmap
         self.teeth_bbox = teeth_bbox
         self.incisor_distance = incisor_distance
+        self.incisor_distance_3d_mm = incisor_distance_3d_mm
+        self.incisor_measurement = incisor_measurement
         self.floatValueMin = float(floatValueMin) if floatValueMin is not None else None
         self.floatValueMax = float(floatValueMax) if floatValueMax is not None else None
 
@@ -147,11 +158,92 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
     # Process teeth map: resize and analyze
     teeth_bbox = None
     incisor_distance = None
+    incisor_distance_3d_mm = None
+    incisor_measurement = None
     if teeth_image is not None:
         teeth_image = teeth_image.resize(picture_image.size)
         teeth_bbox = find_bounding_box_teeth(teeth_image)
         if teeth_bbox is not None:
             incisor_distance = find_incisor_distance_teeth(teeth_image, teeth_bbox)
+
+            # 3D distance for legacy edge-of-gap points
+            if (
+                incisor_distance is not None
+                and depth_image is not None
+                and float_min is not None
+                and float_max is not None
+            ):
+                # Legacy format: (x, y1, x, y2)
+                lx1, ly1, lx2, ly2 = incisor_distance
+                photo_w, photo_h = picture_image.size
+                ld_upper = sample_depth_at_point(
+                    depth_image, lx1, ly1, photo_w, photo_h
+                )
+                ld_lower = sample_depth_at_point(
+                    depth_image, lx2, ly2, photo_w, photo_h
+                )
+                if ld_upper is not None and ld_lower is not None:
+                    legacy_3d = compute_incisor_distance_3d(
+                        (float(lx1), float(ly1)),
+                        (float(lx2), float(ly2)),
+                        ld_upper,
+                        ld_lower,
+                        float(float_min),
+                        float(float_max),
+                    )
+                    if legacy_3d is not None:
+                        incisor_distance_3d_mm = legacy_3d[0]
+
+            # Centroid-based measurement with depth integration
+            centroids = find_incisor_centroids(teeth_image, teeth_bbox)
+            if centroids is not None:
+                upper_c, lower_c = centroids
+                pixel_dist_y = abs(lower_c[1] - upper_c[1])
+
+                upper_depth_raw = None
+                lower_depth_raw = None
+                upper_distance_cm = None
+                lower_distance_cm = None
+                distance_3d_mm = None
+
+                if depth_image is not None:
+                    photo_w, photo_h = picture_image.size
+                    upper_depth_raw = sample_depth_at_point(
+                        depth_image, upper_c[0], upper_c[1], photo_w, photo_h
+                    )
+                    lower_depth_raw = sample_depth_at_point(
+                        depth_image, lower_c[0], lower_c[1], photo_w, photo_h
+                    )
+
+                    if (
+                        upper_depth_raw is not None
+                        and lower_depth_raw is not None
+                        and float_min is not None
+                        and float_max is not None
+                    ):
+                        result_3d = compute_incisor_distance_3d(
+                            upper_c,
+                            lower_c,
+                            upper_depth_raw,
+                            lower_depth_raw,
+                            float(float_min),
+                            float(float_max),
+                        )
+                        if result_3d is not None:
+                            distance_3d_mm, upper_distance_cm, lower_distance_cm = (
+                                result_3d
+                            )
+
+                incisor_measurement = IncisorMeasurement(
+                    upper_centroid=upper_c,
+                    lower_centroid=lower_c,
+                    upper_depth_raw=upper_depth_raw,
+                    lower_depth_raw=lower_depth_raw,
+                    upper_distance_cm=upper_distance_cm,
+                    lower_distance_cm=lower_distance_cm,
+                    distance_3d_mm=distance_3d_mm,
+                    pixel_distance_y=pixel_dist_y,
+                )
 
     # Process skin map: resize
     if skin_image is not None:
@@ -166,6 +258,8 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         floatValueMax=float_max,
         teeth_bbox=teeth_bbox,
         incisor_distance=incisor_distance,
+        incisor_distance_3d_mm=incisor_distance_3d_mm,
+        incisor_measurement=incisor_measurement,
     )
 
 

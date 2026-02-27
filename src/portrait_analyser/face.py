@@ -1,10 +1,23 @@
 import os
+from dataclasses import dataclass
 
 import cv2
 import numpy
 from PIL import Image
 
 from .exceptions import MultipleFacesDetected, NoFacesDetected
+
+
+@dataclass
+class IncisorMeasurement:
+    upper_centroid: tuple[float, float]  # (x, y) in photo/teethmap coordinates
+    lower_centroid: tuple[float, float]  # (x, y) in photo/teethmap coordinates
+    upper_depth_raw: int | None = None  # raw pixel value from depth map
+    lower_depth_raw: int | None = None
+    upper_distance_cm: float | None = None  # physical distance from camera (cm)
+    lower_distance_cm: float | None = None
+    distance_3d_mm: float | None = None  # 3D Euclidean distance between centroids
+    pixel_distance_y: float = 0.0  # legacy-style vertical pixel gap
 
 face_cascade = cv2.CascadeClassifier(
     os.path.join(cv2.__path__[0], "data/haarcascade_frontalface_default.xml")
@@ -286,3 +299,151 @@ def find_incisor_distance_teeth(
     found_values.sort()
     _, x, y1, y2 = found_values.pop()
     return (x, y1, x, y2)
+
+
+def _pick_side(xs, ys, x_midline, use_left):
+    """Keep only the left or right half of pixel coordinates.
+
+    Used to avoid the septum (dark gap between central incisors).
+    The caller decides which side to use so that upper and lower
+    centroids are on the same side (left-to-left or right-to-right).
+    """
+    if use_left:
+        mask = xs < x_midline
+    else:
+        mask = xs >= x_midline
+    return xs[mask], ys[mask]
+
+
+def find_incisor_centroids(
+    teethmap,
+    bounding_box_teeth,
+    threshold=200,
+    margin_x=0.25,
+    min_pixels=50,
+    centroid_margin_x=0.35,
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """Find centroids of upper and lower incisor surfaces.
+
+    Returns ((upper_cx, upper_cy), (lower_cx, lower_cy)) in teethmap coordinates,
+    or None if centroids cannot be determined.
+    """
+    bb_x, bb_y, bb_w, bb_h = bounding_box_teeth
+    y_mid = bb_y + bb_h / 2
+
+    # Determine the gap midline using median of per-column midpoints
+    x_start = int(bb_x + bb_w / 2 - margin_x * bb_w / 2)
+    x_end = int(bb_x + bb_w / 2 + margin_x * bb_w / 2)
+    min_he = bb_y
+    max_he = bb_y + bb_h
+
+    gap_midpoints = []
+    for x in range(x_start, x_end):
+        upper_y = y_mid
+        while upper_y > min_he:
+            upper_y -= 1
+            if teethmap.getpixel((x, int(upper_y))) >= threshold:
+                break
+        else:
+            continue
+
+        lower_y = y_mid
+        while lower_y < max_he:
+            lower_y += 1
+            if teethmap.getpixel((x, int(lower_y))) >= threshold:
+                break
+        else:
+            continue
+
+        if upper_y > min_he and lower_y < max_he:
+            gap_midpoints.append((upper_y + lower_y) / 2)
+
+    if not gap_midpoints:
+        return None
+
+    gap_midline = sorted(gap_midpoints)[len(gap_midpoints) // 2]  # median
+
+    # Extract ROI restricted to central incisor strip (excludes lateral teeth
+    # that form an arch and would pull centroids into the mouth cavity)
+    arr = numpy.array(teethmap)
+    cx_start = int(bb_x + bb_w / 2 - centroid_margin_x * bb_w / 2)
+    cx_end = int(bb_x + bb_w / 2 + centroid_margin_x * bb_w / 2)
+    roi = arr[bb_y : bb_y + bb_h, cx_start:cx_end]
+
+    ys, xs = numpy.where(roi >= threshold)
+    if len(ys) == 0:
+        return None
+
+    # Convert to teethmap coordinates
+    abs_xs = xs + cx_start
+    abs_ys = ys + bb_y
+
+    # Split into upper and lower groups
+    upper_mask = abs_ys < gap_midline
+    lower_mask = abs_ys > gap_midline
+
+    upper_xs = abs_xs[upper_mask]
+    upper_ys = abs_ys[upper_mask]
+    lower_xs = abs_xs[lower_mask]
+    lower_ys = abs_ys[lower_mask]
+
+    if len(upper_xs) < min_pixels or len(lower_xs) < min_pixels:
+        return None
+
+    # Avoid the septum (dark gap between central incisors): split pixels
+    # into left/right halves at the X midline, then keep the same side for
+    # both upper and lower groups. This ensures the centroid pair measures
+    # left-upper to left-lower (or right to right), not across the septum.
+    # The side is chosen by total pixel count across both groups.
+    x_midline = (cx_start + cx_end) / 2
+
+    upper_left = numpy.sum(upper_xs < x_midline)
+    upper_right = numpy.sum(upper_xs >= x_midline)
+    lower_left = numpy.sum(lower_xs < x_midline)
+    lower_right = numpy.sum(lower_xs >= x_midline)
+
+    use_left = (upper_left + lower_left) >= (upper_right + lower_right)
+
+    upper_xs, upper_ys = _pick_side(upper_xs, upper_ys, x_midline, use_left)
+    lower_xs, lower_ys = _pick_side(lower_xs, lower_ys, x_midline, use_left)
+
+    if len(upper_xs) == 0 or len(lower_xs) == 0:
+        return None
+
+    upper_centroid = (float(numpy.mean(upper_xs)), float(numpy.mean(upper_ys)))
+    lower_centroid = (float(numpy.mean(lower_xs)), float(numpy.mean(lower_ys)))
+
+    return (upper_centroid, lower_centroid)
+
+
+def sample_depth_at_point(
+    depthmap, point_x, point_y, photo_width, photo_height, kernel_size=3
+) -> int | None:
+    """Sample depth map at a photo-space coordinate using median filtering.
+
+    Translates from photo-space to depth-map-space and returns the median
+    value of a kernel_size x kernel_size region.
+    """
+    depth_x = round(point_x * depthmap.width / photo_width)
+    depth_y = round(point_y * depthmap.height / photo_height)
+
+    half = kernel_size // 2
+    values = []
+    for dy in range(-half, half + 1):
+        for dx in range(-half, half + 1):
+            sx = depth_x + dx
+            sy = depth_y + dy
+            if 0 <= sx < depthmap.width and 0 <= sy < depthmap.height:
+                px = depthmap.getpixel((sx, sy))
+                # Multi-channel depth maps (e.g. RGB): take first channel
+                if isinstance(px, tuple):
+                    px = px[0]
+                values.append(px)
+
+    if not values:
+        return None
+
+    values.sort()
+    return values[len(values) // 2]
+
+
