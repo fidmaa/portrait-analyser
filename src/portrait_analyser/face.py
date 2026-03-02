@@ -110,7 +110,11 @@ class Face(Rectangle):
 
     def translate_coordinates(self, new_max_width, new_max_height):
         return translate_coordinates(
-            self, new_max_width, new_max_height, self.image.size[0], self.image.size[1]
+            self,
+            new_max_width,
+            new_max_height,
+            self.image.size[0],
+            self.image.size[1],
         )
 
     def calculate_percentage_of_image(self):
@@ -126,7 +130,10 @@ class Face(Rectangle):
         ret = Image_to_cv2(self.image)
         if mode:
             ret = cv2.cvtColor(ret, mode)
-        return ret[self.y : self.y + self.height - 1, self.x : self.x + self.width - 1]
+        return ret[
+            self.y : self.y + self.height - 1,
+            self.x : self.x + self.width - 1,
+        ]
 
     def find_eyes(self):
         gray = self.get_image_for_analysis()
@@ -134,13 +141,39 @@ class Face(Rectangle):
         # detects eyes of within the detected face area (roi)
         eyes = eye_cascade.detectMultiScale(gray)
 
+        min_eye_width = self.width * 0.10
+        max_eye_center_y = self.height * 0.6
+
         self.eyes = []
-        # draw a rectangle around eyes
         for ex, ey, ew, eh in eyes:
+            if ew < min_eye_width:
+                continue
+            if (ey + eh / 2) > max_eye_center_y:
+                continue
             self.eyes.append(Eye(self, ex, ey, ew, eh))
 
 
-def get_face_parameters(input_image: Image, raise_opencv_exceptions=False):
+def detect_eyes(image):
+    """Detect eyes in the full image without face detection.
+
+    Returns list of Rectangle objects in image-absolute coordinates.
+    Useful as a fallback when face detection fails (NoFacesDetected).
+    """
+    gray = cv2.cvtColor(Image_to_cv2(image), cv2.COLOR_BGR2GRAY)
+    detections = eye_cascade.detectMultiScale(gray)
+    img_w, _ = image.size
+    min_eye_width = img_w * 0.03
+    result = []
+    for ex, ey, ew, eh in detections:
+        if ew < min_eye_width:
+            continue
+        result.append(Rectangle(ex, ey, ew, eh))
+    return result
+
+
+def get_face_parameters(
+    input_image: Image.Image, raise_opencv_exceptions=False
+):
     """Get face position and size or return an exception in
     case there's none."""
 
@@ -149,9 +182,9 @@ def get_face_parameters(input_image: Image, raise_opencv_exceptions=False):
 
     try:
         face = face_cascade.detectMultiScale(image, scaleFactor=1.3, minNeighbors=5)
-    except Exception as e:
+    except Exception:
         if raise_opencv_exceptions:
-            raise e
+            raise
         face = []
 
     #
@@ -162,48 +195,327 @@ def get_face_parameters(input_image: Image, raise_opencv_exceptions=False):
         x, y, wi, he = face[0]
         return Face(input_image, x, y, wi, he)
 
-    elif len(face) == 0:
+    if len(face) == 0:
         raise NoFacesDetected()
 
+    raise MultipleFacesDetected()
+
+
+def _gaussian_kernel(sigma, truncate=4.0):
+    """Create a 1D Gaussian kernel for smoothing (no scipy dependency)."""
+    radius = int(truncate * sigma + 0.5)
+    x = numpy.arange(-radius, radius + 1, dtype=float)
+    kernel = numpy.exp(-0.5 * (x / sigma) ** 2)
+    return kernel / kernel.sum()
+
+
+def find_neck_narrowest_row(
+    skinmap,
+    search_zone=None,
+    face_location=None,
+    threshold=1,
+    smooth_sigma=3.0,
+    max_rows=200,
+):
+    """Find the collar line where skin disappears in the center strip.
+
+    Scans downward from the chin and detects where the central neck skin
+    ends (clothing begins). Uses a center strip to avoid being fooled by
+    wide shoulders or V-neck gaps. Requires 3 consecutive rows without
+    center skin to confirm the collar.
+
+    Parameters
+    ----------
+    skinmap : PIL Image "L"
+        Skin segmentation map.
+    search_zone : tuple (center_x, scan_start_y, scan_width) or None
+        Eye-anchored search zone from estimate_neck_search_zone().
+    face_location : tuple or Rectangle (x, y, w, h) or None
+        Fallback face bounding box. Used if search_zone is None.
+    threshold : int
+        Minimum pixel value to count as skin.
+    smooth_sigma : float
+        Unused. Kept for API compatibility.
+    max_rows : int
+        Maximum number of rows to scan below the start point.
+
+    Returns
+    -------
+    (x_left, neck_y, x_right, neck_y) or None if no neck found.
+    """
+    img_width, img_height = skinmap.size
+    arr = numpy.array(skinmap)
+
+    # Determine scan parameters
+    if search_zone is not None:
+        center_x, scan_start_y, scan_width = search_zone
+        x_scan_left = max(0, center_x - scan_width // 2)
+        x_scan_right = min(img_width, center_x + scan_width // 2)
+    elif face_location is not None:
+        scan_start_y = face_location[1] + face_location[3]
+        x_scan_left = 0
+        x_scan_right = img_width
     else:
-        raise MultipleFacesDetected()
+        return None
 
+    scan_end_y = min(img_height, scan_start_y + max_rows)
+    if scan_start_y >= scan_end_y:
+        return None
 
-def find_neck_measurement_point(skinmap, face_location, threshold=200):
-    """Find the most narrow line horizontal from the bottom to the top, to the lower
-    boundary of the face"""
+    # For each row, find leftmost and rightmost skin pixels (full width scan)
+    widths = []
+    lefts = []
+    rights = []
+    y_coords = []
 
-    # WARNING: this asserts that skinmap and the photo that the face_location
-    # bounding box was taken from has the SAME size
-
-    y = face_location[1] + face_location[3]
-    results = []
-
-    while y < skinmap.size[1]:
-        start_x, end_x = None, None
-        for x in range(face_location[0], face_location[0] + face_location[2]):
-            if skinmap.getpixel((x, y)) >= threshold:
-                if start_x is None:
-                    start_x = x
-                    continue
-
-                end_x = x
-
-        if end_x is None or start_x is None:
+    for y in range(scan_start_y, scan_end_y):
+        row = arr[y, x_scan_left:x_scan_right]
+        skin_cols = numpy.where(row >= threshold)[0]
+        if len(skin_cols) == 0:
+            widths.append(0)
+            lefts.append(0)
+            rights.append(0)
+            y_coords.append(y)
             continue
 
-        distance = end_x - start_x
-        if results:
-            if distance > results[-1][0]:
+        left = int(skin_cols[0]) + x_scan_left
+        right = int(skin_cols[-1]) + x_scan_left
+        widths.append(right - left)
+        lefts.append(left)
+        rights.append(right)
+        y_coords.append(y)
+
+    widths_arr = numpy.array(widths, dtype=float)
+
+    # Filter to only valid (non-zero) rows to avoid boundary artifacts
+    # where zero-width rows would pull down smoothed values of neighbors
+    valid_mask = widths_arr > 0
+    if not numpy.any(valid_mask):
+        return None
+
+    valid_indices = numpy.where(valid_mask)[0]
+    # Find collar line: where skin disappears in the center strip.
+    if search_zone is not None:
+        strip_center = center_x
+    else:
+        first_valid = valid_indices[0]
+        strip_center = (lefts[first_valid] + rights[first_valid]) // 2
+
+    strip_half = max(10, int((x_scan_right - x_scan_left) * 0.15))
+    strip_left = max(x_scan_left, strip_center - strip_half)
+    strip_right = min(x_scan_right, strip_center + strip_half)
+    min_center_pixels = 3
+
+    last_skin_idx = None
+    gap_count = 0
+    collar_gap_rows = 3
+
+    for i in range(len(y_coords)):
+        y = y_coords[i]
+        center_row = arr[y, strip_left:strip_right]
+        center_skin = numpy.count_nonzero(center_row >= threshold)
+
+        if center_skin >= min_center_pixels:
+            last_skin_idx = i
+            gap_count = 0
+        else:
+            gap_count += 1
+            if gap_count >= collar_gap_rows and last_skin_idx is not None:
                 break
 
-        results.append((distance, y, start_x, end_x))
-        y += 1
+    if last_skin_idx is None:
+        return None
 
-    results.sort()
+    neck_y = y_coords[last_skin_idx]
+    x_left = lefts[last_skin_idx]
+    x_right = rights[last_skin_idx]
 
-    res = results[0]
-    return (res[2], res[1], res[3], res[1])
+    if x_right <= x_left:
+        return None
+
+    return (x_left, neck_y, x_right, neck_y)
+
+
+def estimate_neck_search_zone(face=None, *, eyes=None, image_width=None):
+    """Estimate where to search for the neck based on detected eyes.
+
+    Uses interpupillary distance (IPD) and facial proportions to estimate
+    chin position and neck search zone, bypassing the unreliable face box.
+
+    Can be called in two ways:
+    - face provided: reads face.eyes, uses face.x/face.y as offset
+    - eyes + image_width provided: eyes are image-absolute (standalone detection)
+
+    Returns (center_x, scan_start_y, scan_width) or None if <2 usable eyes.
+    """
+    if face is not None:
+        eye_list = face.eyes
+        offset_x = face.x
+        offset_y = face.y
+        ref_width = face.width
+    elif eyes is not None and image_width is not None:
+        eye_list = eyes
+        offset_x = 0
+        offset_y = 0
+        ref_width = image_width
+    else:
+        return None
+
+    if len(eye_list) < 2:
+        return None
+
+    # Pick the best eye pair: closest Y with reasonable X separation
+    sorted_eyes = sorted(eye_list, key=lambda e: e.center_y)
+    best_pair = None
+    best_y_diff = float("inf")
+
+    for i in range(len(sorted_eyes)):
+        for j in range(i + 1, len(sorted_eyes)):
+            x_sep = abs(sorted_eyes[i].center_x - sorted_eyes[j].center_x)
+            y_diff = abs(sorted_eyes[i].center_y - sorted_eyes[j].center_y)
+            # Require reasonable horizontal separation (at least 20% of ref width)
+            if x_sep < ref_width * 0.2:
+                continue
+            if y_diff < best_y_diff:
+                best_y_diff = y_diff
+                best_pair = (sorted_eyes[i], sorted_eyes[j])
+
+    if best_pair is None:
+        return None
+
+    e1, e2 = best_pair
+    # Convert to image-absolute coordinates
+    mid_x = offset_x + (e1.center_x + e2.center_x) / 2
+    mid_y = offset_y + (e1.center_y + e2.center_y) / 2
+    ipd = abs(e1.center_x - e2.center_x)
+
+    # Chin is ~1.2 IPD below eye midpoint (standard facial proportions)
+    chin_y = mid_y + 1.2 * ipd
+    # Start scanning at chin estimate (narrowest point is typically 0.1-0.3 IPD below)
+    scan_start_y = int(chin_y)
+    # Search width: 3.0x IPD centered on eye midpoint (wide enough for shoulders)
+    scan_width = int(3.0 * ipd)
+
+    return (int(mid_x), scan_start_y, scan_width)
+
+
+def find_narrowest_skin_row(
+    skinmap, scan_start_y, scan_end_y, threshold=1,
+):
+    """Find the narrowest skin row between scan_start_y and scan_end_y.
+
+    Scans every row in the given range and finds the one with the minimum
+    horizontal skin extent (leftmost to rightmost skin pixel). No center-strip
+    logic, no collar detection — just the minimum-width row that still has skin.
+
+    Parameters
+    ----------
+    skinmap : PIL Image "L"
+        Skin segmentation map.
+    scan_start_y : int
+        First row to scan (inclusive).
+    scan_end_y : int
+        Last row to scan (exclusive).
+    threshold : int
+        Minimum pixel value to count as skin.
+
+    Returns
+    -------
+    (x_left, neck_y, x_right, neck_y) at the narrowest row, or None if no
+    skin rows are found in the range.
+    """
+    arr = numpy.array(skinmap)
+    img_height, img_width = arr.shape[:2]
+
+    scan_start_y = max(0, scan_start_y)
+    scan_end_y = min(img_height, scan_end_y)
+
+    if scan_start_y >= scan_end_y:
+        return None
+
+    best_width = None
+    best_left = 0
+    best_right = 0
+    best_y = 0
+
+    for y in range(scan_start_y, scan_end_y):
+        row = arr[y, :]
+        skin_cols = numpy.where(row >= threshold)[0]
+        if len(skin_cols) == 0:
+            continue
+
+        left = int(skin_cols[0])
+        right = int(skin_cols[-1])
+        width = right - left
+
+        if width <= 0:
+            continue
+
+        if best_width is None or width < best_width:
+            best_width = width
+            best_left = left
+            best_right = right
+            best_y = y
+
+    if best_width is None:
+        return None
+
+    return (best_left, best_y, best_right, best_y)
+
+
+def find_neck_measurement_point(
+    skinmap, face_location=None, threshold=1, face=None, smooth_sigma=3.0,
+    eyes=None, image_width=None,
+    scan_start_y=None, scan_end_y=None,
+):
+    """Find the neck measurement row below the face.
+
+    When ``scan_start_y`` and ``scan_end_y`` are both provided (MediaPipe
+    bounds), uses :func:`find_narrowest_skin_row` to locate the actual
+    narrowest skin row within that range.  Falls through to the existing
+    collar-detection logic if that returns None.
+
+    When a Face object is available (via `face` kwarg, or when `face_location`
+    is itself a Face instance with eyes), uses eye-anchored search zone for
+    robust detection. Falls back to face-box-based search otherwise.
+
+    When `eyes` and `image_width` are provided (standalone eye detection,
+    no face available), uses those for eye-anchored search.
+
+    Returns (x_left, neck_y, x_right, neck_y).
+    Raises IndexError if no valid neck row is found.
+    """
+    # When MediaPipe bounds are provided, try narrowest-row search first
+    if scan_start_y is not None and scan_end_y is not None:
+        result = find_narrowest_skin_row(
+            skinmap, scan_start_y, scan_end_y, threshold=threshold,
+        )
+        if result is not None:
+            return result
+
+    # Auto-detect Face object: callers often pass Face as face_location
+    if face is None and hasattr(face_location, "eyes"):
+        face = face_location
+
+    search_zone = None
+    if face is not None:
+        search_zone = estimate_neck_search_zone(face)
+    if search_zone is None and eyes is not None and image_width is not None:
+        search_zone = estimate_neck_search_zone(eyes=eyes, image_width=image_width)
+
+    result = find_neck_narrowest_row(
+        skinmap,
+        search_zone=search_zone,
+        face_location=face_location,
+        threshold=threshold,
+        smooth_sigma=smooth_sigma,
+    )
+
+    if result is not None:
+        return result
+
+    # If numpy scan found nothing, raise IndexError for backward compatibility
+    raise IndexError("No valid neck row found")
 
 
 def find_bounding_box_teeth(teethmap, margin_x=100, margin_y=100, min_value=200):
@@ -244,12 +556,17 @@ def find_bounding_box_teeth(teethmap, margin_x=100, margin_y=100, min_value=200)
 
 
 def find_incisor_distance_teeth(
-    teethmap, bounding_box_teeth, threshold=200, margin_x=0.25
+    teethmap, bounding_box_teeth, threshold=200, margin_x=0.5
 ):
-    """Iterate from teethmap x1 to x1 + width, starting from the half of it,
-    try finding points with MAXIMAL distance as long as they are within bounding_box_teeth
-    and their value is above 200 (well-detected teeth, to avoid diasthemes which would probably
-    be the highest distance points, but that's not what we're looking for...)"""
+    """Find incisor distance from teeth map.
+
+    Iterate from teethmap x1 to x1 + width, starting from
+    the half of it, try finding points with MAXIMAL distance
+    as long as they are within bounding_box_teeth and their
+    value is above 200 (well-detected teeth, to avoid
+    diasthemes which would probably be the highest distance
+    points, but that's not what we're looking for...).
+    """
 
     y_mid = bounding_box_teeth[1] + bounding_box_teeth[3] / 2
     min_he = bounding_box_teeth[1]
@@ -319,9 +636,9 @@ def find_incisor_centroids(
     teethmap,
     bounding_box_teeth,
     threshold=200,
-    margin_x=0.25,
+    margin_x=0.5,
     min_pixels=50,
-    centroid_margin_x=0.35,
+    centroid_margin_x=0.5,
 ) -> tuple[tuple[float, float], tuple[float, float]] | None:
     """Find centroids of upper and lower incisor surfaces.
 

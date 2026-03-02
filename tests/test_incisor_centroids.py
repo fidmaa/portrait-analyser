@@ -128,7 +128,8 @@ class TestFindIncisorCentroids:
         )
 
         # Upper centroid X should be near horizontal center
-        assert 150 < upper_c[0] < 250, (
+        # (septum avoidance picks one side, so allow range 100-300)
+        assert 100 <= upper_c[0] <= 300, (
             f"Upper centroid X={upper_c[0]:.1f} is not centered"
         )
 

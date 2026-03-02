@@ -17,6 +17,9 @@ dependencies = [
     "pyheif>=0.7.1; sys_platform == 'linux'",
 ]
 
+[project.optional-dependencies]
+pose = ["mediapipe>=0.10.30"]
+
 [dependency-groups]
 dev = [
     "pytest>=8.1.1",

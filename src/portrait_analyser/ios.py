@@ -24,6 +24,7 @@ class IOSPortrait:
         depthmap=None,
         teethmap=None,
         skinmap=None,
+        hairmap=None,
         floatValueMin=None,
         floatValueMax=None,
         teeth_bbox=None,
@@ -35,6 +36,7 @@ class IOSPortrait:
         self.depthmap = depthmap
         self.teethmap = teethmap
         self.skinmap = skinmap
+        self.hairmap = hairmap
         self.teeth_bbox = teeth_bbox
         self.incisor_distance = incisor_distance
         self.incisor_distance_3d_mm = incisor_distance_3d_mm
@@ -133,13 +135,15 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
             raise NoDepthMapFound(f"{fileName} has no depth data")
 
         # Extract auxiliary semantic maps
-        teeth_raw = skin_raw = None
+        teeth_raw = skin_raw = hair_raw = None
         for aux in primary_image.auxiliary_images:
             aux_type = getattr(aux, "type", "")
             if aux_type == "urn:com:apple:photo:2019:aux:semanticteethmatte":
                 teeth_raw = aux.image
             elif aux_type == "urn:com:apple:photo:2019:aux:semanticskinmatte":
                 skin_raw = aux.image
+            elif aux_type == "urn:com:apple:photo:2019:aux:semantichairmatte":
+                hair_raw = aux.image
 
         # Decode depth map
         depth_loaded = primary_image.depth_image.image.load()
@@ -154,6 +158,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         # Decode semantic maps
         teeth_image = _decode_semantic_map(teeth_raw) if teeth_raw else None
         skin_image = _decode_semantic_map(skin_raw) if skin_raw else None
+        hair_image = _decode_semantic_map(hair_raw) if hair_raw else None
 
     # Process teeth map: resize and analyze
     teeth_bbox = None
@@ -249,11 +254,16 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
     if skin_image is not None:
         skin_image = skin_image.resize(picture_image.size)
 
+    # Process hair map: resize
+    if hair_image is not None:
+        hair_image = hair_image.resize(picture_image.size)
+
     return IOSPortrait(
         photo=picture_image,
         depthmap=depth_image,
         teethmap=teeth_image,
         skinmap=skin_image,
+        hairmap=hair_image,
         floatValueMin=float_min,
         floatValueMax=float_max,
         teeth_bbox=teeth_bbox,
