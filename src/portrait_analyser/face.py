@@ -1,7 +1,8 @@
 import os
+import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
-import cv2
 import numpy
 from PIL import Image
 
@@ -19,17 +20,30 @@ class IncisorMeasurement:
     distance_3d_mm: float | None = None  # 3D Euclidean distance between centroids
     pixel_distance_y: float = 0.0  # legacy-style vertical pixel gap
 
-face_cascade = cv2.CascadeClassifier(
-    os.path.join(cv2.__path__[0], "data/haarcascade_frontalface_default.xml")
+
+_FACE_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "face_detector/blaze_face_short_range/float16/1/"
+    "blaze_face_short_range.tflite"
 )
-
-eye_cascade = cv2.CascadeClassifier(
-    os.path.join(cv2.__path__[0], "data/haarcascade_eye_tree_eyeglasses.xml")
-)
+_CACHE_DIR = Path.home() / ".cache" / "portrait-analyser"
+_FACE_MODEL_FILENAME = "blaze_face_short_range.tflite"
 
 
-def Image_to_cv2(pil_image):
-    return cv2.cvtColor(numpy.array(pil_image), cv2.COLOR_RGB2BGR)
+def _get_face_model_path() -> str:
+    """Return path to the FaceDetector .tflite model, downloading if needed."""
+    model_path = _CACHE_DIR / _FACE_MODEL_FILENAME
+    if not model_path.exists():
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp_path = model_path.with_suffix(".tmp")
+        try:
+            urllib.request.urlretrieve(_FACE_MODEL_URL, tmp_path)
+            os.replace(tmp_path, model_path)
+        except Exception:
+            if tmp_path.exists():
+                tmp_path.unlink()
+            raise
+    return str(model_path)
 
 
 def translate_coordinates(
@@ -92,21 +106,25 @@ class Eye(Rectangle):
             self_rect[3],
         )
 
-    def get_image_for_analysis(self, mode):
-        ret = Image_to_cv2(self.face.image)
-        if mode:
-            ret = cv2.cvtColor(ret, mode)
-        return ret[
+    def get_image_for_analysis(self, mode="gray"):
+        if mode == "gray":
+            arr = numpy.array(self.face.image.convert("L"))
+        else:
+            arr = numpy.array(self.face.image.convert("RGB"))
+        return arr[
             self.face.y + self.y : self.y + self.face.y + self.height,
             self.x + self.face.x : self.x + self.face.x + self.width,
         ].copy()
 
 
 class Face(Rectangle):
-    def __init__(self, image, *args, **kw):
+    def __init__(self, image, *args, eyes=None, **kw):
         super().__init__(*args, **kw)
         self.image = image
-        self.find_eyes()
+        if eyes is not None:
+            self.eyes = eyes
+        else:
+            self.find_eyes()
 
     def translate_coordinates(self, new_max_width, new_max_height):
         return translate_coordinates(
@@ -126,31 +144,18 @@ class Face(Rectangle):
 
         return percent_width, percent_height
 
-    def get_image_for_analysis(self, mode=cv2.COLOR_BGR2GRAY):
-        ret = Image_to_cv2(self.image)
-        if mode:
-            ret = cv2.cvtColor(ret, mode)
-        return ret[
+    def get_image_for_analysis(self, mode="gray"):
+        if mode == "gray":
+            arr = numpy.array(self.image.convert("L"))
+        else:
+            arr = numpy.array(self.image.convert("RGB"))
+        return arr[
             self.y : self.y + self.height - 1,
             self.x : self.x + self.width - 1,
         ]
 
     def find_eyes(self):
-        gray = self.get_image_for_analysis()
-
-        # detects eyes of within the detected face area (roi)
-        eyes = eye_cascade.detectMultiScale(gray)
-
-        min_eye_width = self.width * 0.10
-        max_eye_center_y = self.height * 0.6
-
         self.eyes = []
-        for ex, ey, ew, eh in eyes:
-            if ew < min_eye_width:
-                continue
-            if (ey + eh / 2) > max_eye_center_y:
-                continue
-            self.eyes.append(Eye(self, ex, ey, ew, eh))
 
 
 def detect_eyes(image):
@@ -159,16 +164,40 @@ def detect_eyes(image):
     Returns list of Rectangle objects in image-absolute coordinates.
     Useful as a fallback when face detection fails (NoFacesDetected).
     """
-    gray = cv2.cvtColor(Image_to_cv2(image), cv2.COLOR_BGR2GRAY)
-    detections = eye_cascade.detectMultiScale(gray)
-    img_w, _ = image.size
-    min_eye_width = img_w * 0.03
-    result = []
-    for ex, ey, ew, eh in detections:
-        if ew < min_eye_width:
-            continue
-        result.append(Rectangle(ex, ey, ew, eh))
-    return result
+    import mediapipe as mp
+
+    model_path = _get_face_model_path()
+    image_array = numpy.array(image.convert("RGB"))
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_array)
+
+    options = mp.tasks.vision.FaceDetectorOptions(
+        base_options=mp.tasks.BaseOptions(model_asset_path=model_path),
+        min_detection_confidence=0.5,
+    )
+
+    with mp.tasks.vision.FaceDetector.create_from_options(options) as detector:
+        detection_result = detector.detect(mp_image)
+
+    img_w, img_h = image.size
+    eyes = []
+    for detection in detection_result.detections:
+        keypoints = detection.keypoints
+        if keypoints and len(keypoints) >= 2:
+            face_w = detection.bounding_box.width
+            face_h = detection.bounding_box.height
+            for i in [0, 1]:  # left eye, right eye keypoints
+                kp = keypoints[i]
+                eye_x = kp.x * img_w
+                eye_y = kp.y * img_h
+                eye_w = face_w * 0.15
+                eye_h = face_h * 0.08
+                eyes.append(Rectangle(
+                    int(eye_x - eye_w / 2),
+                    int(eye_y - eye_h / 2),
+                    int(eye_w),
+                    int(eye_h),
+                ))
+    return eyes
 
 
 def get_face_parameters(
@@ -176,29 +205,68 @@ def get_face_parameters(
 ):
     """Get face position and size or return an exception in
     case there's none."""
+    import mediapipe as mp
 
-    # image = numpy.asarray(input_image.convert("RGB"))
-    image = Image_to_cv2(input_image)
+    model_path = _get_face_model_path()
+
+    image_array = numpy.array(input_image.convert("RGB"))
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_array)
+
+    options = mp.tasks.vision.FaceDetectorOptions(
+        base_options=mp.tasks.BaseOptions(model_asset_path=model_path),
+        min_detection_confidence=0.5,
+    )
 
     try:
-        face = face_cascade.detectMultiScale(image, scaleFactor=1.3, minNeighbors=5)
+        with mp.tasks.vision.FaceDetector.create_from_options(options) as detector:
+            result = detector.detect(mp_image)
+        detections = result.detections
     except Exception:
         if raise_opencv_exceptions:
             raise
-        face = []
+        detections = []
 
-    #
-    # Update midline point to match detected face coords
-    #
-
-    if len(face) == 1:
-        x, y, wi, he = face[0]
-        return Face(input_image, x, y, wi, he)
-
-    if len(face) == 0:
+    if len(detections) == 0:
         raise NoFacesDetected()
 
-    raise MultipleFacesDetected()
+    if len(detections) > 1:
+        raise MultipleFacesDetected()
+
+    detection = detections[0]
+    img_w, img_h = input_image.size
+    bbox = detection.bounding_box
+    x = int(bbox.origin_x)
+    y = int(bbox.origin_y)
+    w = int(bbox.width)
+    h = int(bbox.height)
+
+    # Extract eye keypoints from MediaPipe face detection
+    # Keypoints: 0=left eye, 1=right eye, 2=nose tip, 3=mouth center,
+    # 4=left ear tragion, 5=right ear tragion
+    eyes = []
+    keypoints = detection.keypoints
+    if keypoints and len(keypoints) >= 2:
+        for i in [0, 1]:
+            kp = keypoints[i]
+            eye_x_abs = kp.x * img_w
+            eye_y_abs = kp.y * img_h
+            eye_x_rel = eye_x_abs - x
+            eye_y_rel = eye_y_abs - y
+            eye_w = w * 0.15
+            eye_h = h * 0.08
+            eyes.append(Eye(
+                None,  # face reference set below
+                int(eye_x_rel - eye_w / 2),
+                int(eye_y_rel - eye_h / 2),
+                int(eye_w),
+                int(eye_h),
+            ))
+
+    face = Face(input_image, x, y, w, h, eyes=eyes)
+    for eye in face.eyes:
+        eye.face = face
+
+    return face
 
 
 def _gaussian_kernel(sigma, truncate=4.0):
@@ -762,5 +830,3 @@ def sample_depth_at_point(
 
     values.sort()
     return values[len(values) // 2]
-
-

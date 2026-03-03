@@ -9,7 +9,7 @@ so that a GUI can paint the sampled arc.
 import math
 from dataclasses import dataclass
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from .face import find_neck_measurement_point, sample_depth_at_point
 from .incisor import depth_raw_to_distance_cm, pixel_to_mm, vector_length_3d
@@ -51,8 +51,8 @@ class NeckMeasurement:
     # Estimated full circumference = front_arc * circumference_multiplier (mm)
     circumference_mm: float
 
-    # The multiplier used (default 3.0, kept explicit so it can be tuned)
-    circumference_multiplier: float = 1.75
+    # The multiplier used (kept explicit so it can be tuned)
+    circumference_multiplier: float = 2.7
 
 
 def estimate_face_from_skinmap(
@@ -165,9 +165,9 @@ def compute_neck_circumference(
     float_min,  # float — EXIF depth calibration
     float_max,  # float — EXIF depth calibration
     face_location=None,  # tuple (x, y, w, h) or None for auto-estimate from skinmap
-    n_samples=30,  # number of points to sample across the neck
+    n_samples=25,  # number of points to sample across the neck
     skin_threshold=1,    # any nonzero pixel is skin
-    circumference_multiplier=1.75,
+    circumference_multiplier=2.7,
     arc_sag=None,  # None=auto-detect; int=fixed sag in depth-map px
     face=None,  # Face object — enables eye-anchored neck search
     eyes=None,  # list of Rectangle — standalone eye detections (no face)
@@ -188,6 +188,17 @@ def compute_neck_circumference(
     Returns NeckMeasurement with all data, or None if the neck cannot
     be located (e.g. no skin detected below the face).
     """
+    # Neutralise white borders that some skinmaps have — paint a
+    # 30-pixel black frame so border pixels are never mistaken for skin.
+    skinmap = skinmap.copy()
+    draw = ImageDraw.Draw(skinmap)
+    border = 30
+    w, h = skinmap.size
+    draw.rectangle([0, 0, w - 1, border - 1], fill=0)          # top
+    draw.rectangle([0, h - border, w - 1, h - 1], fill=0)      # bottom
+    draw.rectangle([0, 0, border - 1, h - 1], fill=0)          # left
+    draw.rectangle([w - border, 0, w - 1, h - 1], fill=0)      # right
+
     # Auto-estimate face location from skin map when not provided
     if face_location is None:
         face_location = estimate_face_from_skinmap(skinmap, skin_threshold)
@@ -297,20 +308,9 @@ def compute_neck_circumference(
             p1[0], p1[1], p1[2],
         )
 
-    # Step 5: Estimate full circumference via ellipse fitting.
-    # Derive ellipse semi-axes from the 3D arc points:
-    #   a = horizontal semi-axis (half the visible width in mm)
-    #   b = depth bulge (front semi-axis in mm)
-    xs = [p[0] for p in arc_points_3d]
-    zs = [p[2] for p in arc_points_3d]
-    a = (max(xs) - min(xs)) / 2  # horizontal semi-axis (mm)
-    b = max(zs) - min(zs)  # depth bulge = front semi-axis (mm)
-
-    if a > 0 and b > 0:
-        circumference_mm = _ellipse_circumference(a, b)
-    else:
-        # Fallback: use multiplier if ellipse fitting fails (e.g. flat depth)
-        circumference_mm = front_arc_length_mm * circumference_multiplier
+    # Step 5: Estimate full circumference via empirical multiplier.
+    # front_arc_mm * 2.7 ≈ circumference_mm (i.e. front_arc_mm * 0.27 = circumference_cm)
+    circumference_mm = front_arc_length_mm * circumference_multiplier
 
     return NeckMeasurement(
         neck_y=neck_y,

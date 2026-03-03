@@ -3,7 +3,7 @@ from typing import Union
 
 import piexif
 import pyheif
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from . import const
 from .exceptions import ExifValidationFailed, NoDepthMapFound, UnknownExtension
@@ -167,6 +167,17 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
     incisor_measurement = None
     if teeth_image is not None:
         teeth_image = teeth_image.resize(picture_image.size)
+
+        # Neutralise white/noisy borders that some teethmaps have — paint a
+        # 30-pixel black frame so edge pixels are never mistaken for teeth.
+        draw = ImageDraw.Draw(teeth_image)
+        border = 30
+        tw, th = teeth_image.size
+        draw.rectangle([0, 0, tw - 1, border - 1], fill=0)          # top
+        draw.rectangle([0, th - border, tw - 1, th - 1], fill=0)    # bottom
+        draw.rectangle([0, 0, border - 1, th - 1], fill=0)          # left
+        draw.rectangle([tw - border, 0, tw - 1, th - 1], fill=0)    # right
+
         teeth_bbox = find_bounding_box_teeth(teeth_image)
         if teeth_bbox is not None:
             incisor_distance = find_incisor_distance_teeth(teeth_image, teeth_bbox)
