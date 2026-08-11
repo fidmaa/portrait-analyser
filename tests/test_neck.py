@@ -131,7 +131,7 @@ class TestNeckMeasurementDataclass:
         assert len(m.arc_points_photo) == 2
         assert m.front_arc_length_mm == 10.5
         assert m.circumference_mm == 31.5
-        assert m.circumference_multiplier == 2.7
+        assert m.circumference_multiplier == 3.0
 
     def test_custom_multiplier(self):
         m = NeckMeasurement(
@@ -141,10 +141,10 @@ class TestNeckMeasurementDataclass:
             arc_points_3d=[],
             arc_points_photo=[],
             front_arc_length_mm=10.0,
-            circumference_mm=30.0,
-            circumference_multiplier=3.0,
+            circumference_mm=25.0,
+            circumference_multiplier=2.5,
         )
-        assert m.circumference_multiplier == 3.0
+        assert m.circumference_multiplier == 2.5
 
 
 class TestStableDepthEdge:
