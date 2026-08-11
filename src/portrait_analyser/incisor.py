@@ -10,6 +10,17 @@ source data and methodology.
 
 import math
 
+# Range over which the calibration polynomial below is trustworthy. It was
+# fitted to measurements taken between roughly 20 and 70 cm; outside that
+# span a 5th-degree fit has nothing to hold it down. It peaks and turns over
+# past ~80 cm, crosses zero at ~105 cm and goes negative beyond that, which
+# would silently yield negative millimetres-per-pixel. A depth map can easily
+# contain such distances -- the disparity range of a typical portrait spans
+# ~26 to ~197 cm -- so any point beyond this range is reported as
+# unmeasurable rather than converted.
+MIN_CALIBRATED_DISTANCE_CM = 15.0
+MAX_CALIBRATED_DISTANCE_CM = 80.0
+
 
 def depth_raw_to_distance_cm(value, float_min, float_max):
     """Convert raw depth pixel value to physical distance in centimeters.
@@ -34,9 +45,14 @@ def pixels_per_mm_at_distance(distance_cm):
     Calibration polynomial fitted to TrueDepth camera data.
     Constants from own calibration data and curve fitted by MyCurveFit.com.
 
-    :param distance_cm: distance from camera in centimeters (must be >= 15)
-    :returns: pixels per millimeter at the given distance
+    :param distance_cm: distance from camera in centimeters
+    :returns: pixels per millimeter at the given distance, or None when the
+        distance falls outside the calibrated range (see
+        MIN_CALIBRATED_DISTANCE_CM / MAX_CALIBRATED_DISTANCE_CM)
     """
+    if not MIN_CALIBRATED_DISTANCE_CM <= distance_cm <= MAX_CALIBRATED_DISTANCE_CM:
+        return None
+
     d = distance_cm
     return (
         30.79912
@@ -65,10 +81,10 @@ def pixel_to_mm(pixel_coord, distance_cm, image_dimension):
     :param image_dimension: full image width (for an x coordinate) or height
         (for a y coordinate) in pixels, used to locate the principal point
     :returns: physical distance in millimeters relative to the optical axis,
-        or None if conversion fails
+        or None if the distance is outside the calibrated range
     """
     ppmm = pixels_per_mm_at_distance(distance_cm)
-    if ppmm == 0:
+    if ppmm is None or ppmm <= 0:
         return None
     centred_coord = pixel_coord - image_dimension / 2.0
     return centred_coord / ppmm
