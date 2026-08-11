@@ -157,6 +157,14 @@ Both extend `Rectangle` (attributes: `x`, `y`, `width`, `height`, `center_x`, `c
 - `estimate_face_from_skinmap(skinmap, threshold=1) -> tuple[int, int, int, int] | None` -- estimates a synthetic face bounding box from the skin segmentation map alone, for when no OpenCV face detection is available.
 - `NeckMeasurement` -- dataclass with `neck_y`, `left_x`, `right_x` (photo-space), `arc_points_3d` (physical mm coordinates), `arc_points_photo` (pixel coordinates, for overlay painting).
 
+### Robust surface-distance measurement (`depth_sampling` module)
+
+- `median_filter_depthmap(depthmap, size=3) -> Image` -- returns a same-size, single-channel median-filtered copy of a depth map, to be sampled once and reused across many points.
+- `bilinear_sample(image, x, y, invalid_value=None) -> float | None` -- samples an image at fractional coordinates using bilinear interpolation; returns `None` if a contributing pixel equals `invalid_value`, instead of interpolating across holes.
+- `sample_points_along_line(x1, y1, x2, y2, step) -> Iterator[tuple[float, float]]` -- evenly spaced points along a 2D line, always including both endpoints, independent of point order.
+- `sample_filtered_depth(filtered_depthmap, photo_x, photo_y, photo_width, photo_height) -> int | None` -- bilinearly samples a pre-filtered depth map at a photo-space point; `None` over invalid (zero) disparity.
+- `measure_filtered_surface_length(filtered_depthmap, points_photo, photo_width, photo_height, float_min, float_max) -> float | None` -- sums 3D Euclidean distance across consecutive photo-space points, sampling depth via `sample_filtered_depth`. Prefiltering + bilinear sampling smooths TrueDepth sensor noise before it can accumulate across many points walked along a surface, which matters for curved or long paths (e.g. `compute_neck_circumference`'s neck arc, or a straight line drawn across a cheek). Returns `None` if fewer than 2 points were given or any point falls on invalid depth.
+
 ## Exceptions
 
 - `UnknownExtension` -- file is not .heic or .heif

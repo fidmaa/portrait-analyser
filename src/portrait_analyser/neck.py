@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from PIL import Image, ImageDraw
 
+from .depth_sampling import median_filter_depthmap, sample_filtered_depth
 from .face import find_neck_measurement_point, sample_depth_at_point
 from .incisor import depth_raw_to_distance_cm, pixel_to_mm, vector_length_3d
 
@@ -260,6 +261,13 @@ def compute_neck_circumference(
 
     # Step 3: For each sample point, compute Y via half-sine arc,
     # read depth and convert to 3D coordinates.
+    #
+    # Depth is read from a same-size median-filtered copy of the depth map,
+    # bilinearly sampled at the (fractional) native-resolution coordinate.
+    # This smooths TrueDepth sensor noise before it can accumulate across
+    # the many points walked along the arc -- the same fix applied to
+    # fidmaa-gui's surface_vector_filtered() for straight-line measurements.
+    filtered_depthmap = median_filter_depthmap(depthmap, size=3)
     arc_points_3d = []
     arc_points_photo = []
 
@@ -268,11 +276,10 @@ def compute_neck_circumference(
         t = (sx - x_left) / (x_right - x_left)
         sample_y = neck_y + round(amplitude * math.sin(math.pi * t))
 
-        # Sample depth at this photo-space point using median-filtered kernel
-        raw_depth = sample_depth_at_point(
-            depthmap, sx, sample_y, photo_width, photo_height,
+        raw_depth = sample_filtered_depth(
+            filtered_depthmap, sx, sample_y, photo_width, photo_height,
         )
-        if raw_depth is None or raw_depth == 0:
+        if raw_depth is None:
             # Skip points where depth data is missing or zero (invalid disparity)
             continue
 

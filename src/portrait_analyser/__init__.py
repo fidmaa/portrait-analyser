@@ -1,3 +1,10 @@
+from .depth_sampling import (
+    bilinear_sample,
+    measure_filtered_surface_length,
+    median_filter_depthmap,
+    sample_filtered_depth,
+    sample_points_along_line,
+)
 from .exceptions import (
     ExifValidationFailed,
     MultipleFacesDetected,
@@ -62,6 +69,7 @@ __all__ = [
     "NoFacesDetected",
     "Rectangle",
     "UnknownExtension",
+    "bilinear_sample",
     "compute_incisor_distance_3d",
     "compute_mouth_measurement_from_facemesh",
     "compute_neck_circumference",
@@ -80,6 +88,10 @@ __all__ = [
     "find_neck_narrowest_row",
     "get_face_parameters",
     "load_image",
+    "measure_filtered_surface_length",
+    "median_filter_depthmap",
     "pixel_to_mm",
+    "sample_filtered_depth",
+    "sample_points_along_line",
     "vector_length_3d",
 ]
