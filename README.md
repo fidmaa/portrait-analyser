@@ -125,8 +125,8 @@ Both extend `Rectangle` (attributes: `x`, `y`, `width`, `height`, `center_x`, `c
 - `find_neck_measurement_point(skinmap, face_location, threshold=200)` -- finds the narrowest horizontal line below the face in the skin map. Returns `(x1, y1, x2, y2)`.
 - `find_bounding_box_teeth(teethmap, margin_x=100, margin_y=100, min_value=200)` -- finds the bounding box of teeth in the teeth map. Returns `(x, y, width, height)` or `None`.
 - `find_incisor_distance_teeth(teethmap, bounding_box_teeth, threshold=200, margin_x=0.5)` -- measures the vertical pixel distance between upper and lower incisors. Returns `(x, y1, x, y2)` or `None`.
-- `find_incisor_centroids(teethmap, bounding_box_teeth, threshold=200, margin_x=0.5, min_pixels=50, centroid_margin_x=0.5)` -- finds the centroids of the upper and lower incisor surfaces. Returns `((upper_cx, upper_cy), (lower_cx, lower_cy))` in teethmap coordinates, or `None`.
-- `sample_depth_at_point(depthmap, point_x, point_y, photo_width, photo_height, kernel_size=3) -> int | None` -- samples the depth map at a photo-space coordinate using median filtering over a `kernel_size x kernel_size` region.
+- `find_incisor_centroids(teethmap, bounding_box_teeth, threshold=200, margin_x=0.5, min_pixels=50, centroid_margin_x=0.5, ...)` -- finds robust representative points on the facing upper and lower incisal edges. The historical function/field names still use “centroid”, but returned points are snapped to real paired teeth-mask pixels so they measure the inter-incisal gap and provide valid locations for depth sampling. Returns `((upper_x, upper_y), (lower_x, lower_y))` in teethmap coordinates, or `None`.
+- `sample_depth_at_point(depthmap, point_x, point_y, photo_width, photo_height, kernel_size=3, support_mask=None, support_threshold=200, inward_y=0) -> int | None` -- samples the depth map at a photo-space coordinate using median filtering over a `kernel_size x kernel_size` region. An optional foreground mask restricts sampling to the intended surface; `inward_y` moves an edge sample inward in native depth-map pixels.
 
 ### 3D depth conversion (`incisor` module)
 

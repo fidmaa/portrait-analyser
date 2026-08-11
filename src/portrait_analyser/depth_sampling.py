@@ -128,7 +128,8 @@ def measure_filtered_surface_length(
     :param float_min: EXIF FloatMinValue
     :param float_max: EXIF FloatMaxValue
     :returns: total length in millimeters, or None if fewer than 2 points
-        were given or any point falls on invalid depth
+        were given, or any point falls on invalid depth, or any point lies
+        outside the calibration polynomial's trustworthy distance range
     """
     points_3d = []
     for x, y in points_photo:
@@ -144,6 +145,12 @@ def measure_filtered_surface_length(
 
         x_mm = pixel_to_mm(x, z_cm, photo_width)
         y_mm = pixel_to_mm(y, z_cm, photo_height)
+        if x_mm is None or y_mm is None:
+            # Beyond the calibrated range the conversion is meaningless; a
+            # partial walk would silently report a shorter surface, so fail
+            # the whole measurement instead.
+            return None
+
         points_3d.append((x_mm, y_mm, z_cm * 10.0))
 
     if len(points_3d) < 2:

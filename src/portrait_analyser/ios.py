@@ -193,10 +193,22 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                 lx1, ly1, lx2, ly2 = incisor_distance
                 photo_w, photo_h = picture_image.size
                 ld_upper = sample_depth_at_point(
-                    depth_image, lx1, ly1, photo_w, photo_h
+                    depth_image,
+                    lx1,
+                    ly1,
+                    photo_w,
+                    photo_h,
+                    support_mask=teeth_image,
+                    inward_y=-1,
                 )
                 ld_lower = sample_depth_at_point(
-                    depth_image, lx2, ly2, photo_w, photo_h
+                    depth_image,
+                    lx2,
+                    ly2,
+                    photo_w,
+                    photo_h,
+                    support_mask=teeth_image,
+                    inward_y=1,
                 )
                 if ld_upper is not None and ld_lower is not None:
                     legacy_3d = compute_incisor_distance_3d(
@@ -227,10 +239,22 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                 if depth_image is not None:
                     photo_w, photo_h = picture_image.size
                     upper_depth_raw = sample_depth_at_point(
-                        depth_image, upper_c[0], upper_c[1], photo_w, photo_h
+                        depth_image,
+                        upper_c[0],
+                        upper_c[1],
+                        photo_w,
+                        photo_h,
+                        support_mask=teeth_image,
+                        inward_y=-1,
                     )
                     lower_depth_raw = sample_depth_at_point(
-                        depth_image, lower_c[0], lower_c[1], photo_w, photo_h
+                        depth_image,
+                        lower_c[0],
+                        lower_c[1],
+                        photo_w,
+                        photo_h,
+                        support_mask=teeth_image,
+                        inward_y=1,
                     )
 
                     if (
