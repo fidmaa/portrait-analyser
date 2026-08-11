@@ -3,7 +3,7 @@
 import numpy as np
 
 from portrait_analyser.pose import NeckMidpoint, PortraitPose
-from portrait_analyser.segmentation import (
+from portrait_analyser.extended_neck import (
     _compute_width_profile,
     _detect_from_mask,
 )
