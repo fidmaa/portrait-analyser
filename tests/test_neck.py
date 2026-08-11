@@ -542,6 +542,11 @@ class TestComputeNeckCircumference:
         # lower depth at edges and further down (neck surface)
         depthmap = _make_depth_image(width, height, fill_value=120)
 
+        # float_max=4.0 places the neck fill (120) at ~47 cm and the chin (220)
+        # at ~28 cm. With the earlier float_max=2.0 the fill sat at ~83 cm,
+        # outside the calibration polynomial's trustworthy range. Scaling the
+        # disparity range rather than the raw depth values keeps the chin/neck
+        # contrast this test relies on intact.
         # First, run with uniform depth to find where neck_y lands
         probe = compute_neck_circumference(
             skinmap=skinmap,
@@ -549,7 +554,7 @@ class TestComputeNeckCircumference:
             photo_width=width,
             photo_height=height,
             float_min=0.5,
-            float_max=2.0,
+            float_max=4.0,
             face_location=face_location,
             n_samples=10,
             arc_sag=0,
@@ -584,7 +589,7 @@ class TestComputeNeckCircumference:
             photo_width=width,
             photo_height=height,
             float_min=0.5,
-            float_max=2.0,
+            float_max=4.0,
             face_location=face_location,
             n_samples=20,
             arc_sag=None,  # auto-detect

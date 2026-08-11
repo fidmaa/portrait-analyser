@@ -36,7 +36,7 @@ def _make_teeth_image(width, height, upper_band, lower_band, value=255, bg=0):
 
 class TestFindIncisorCentroids:
     def test_basic_symmetric_bands(self):
-        """Symmetric upper/lower teeth bands produce centroids at expected centers."""
+        """Symmetric bands produce points on the two facing incisal edges."""
         # 400x600 image, upper teeth at y=100-200, lower teeth at y=300-400
         # Gap from y=200 to y=300, so gap_midline ~250
         img = _make_teeth_image(400, 600, (100, 200), (300, 400))
@@ -46,21 +46,23 @@ class TestFindIncisorCentroids:
         assert result is not None
 
         upper_c, lower_c = result
-        # Upper centroid X lands on one half of the central strip (denser-half
-        # logic picks left or right to avoid the septum midpoint)
+        # The representative points stay on one side of the septum and in one
+        # shared column, but Y is on the facing edge rather than tooth centre.
         assert 100 <= upper_c[0] <= 300  # within central strip
-        assert 145 < upper_c[1] < 155  # y near 150 (center of 100-200)
-
-        # Lower centroid similarly within central strip
+        assert upper_c[1] == 199
         assert 100 <= lower_c[0] <= 300
-        assert 345 < lower_c[1] < 355  # y near 350 (center of 300-400)
+        assert lower_c[1] == 300
+        assert upper_c[0] == lower_c[0]
+        assert lower_c[1] - upper_c[1] == 101
+        assert img.getpixel((round(upper_c[0]), round(upper_c[1]))) == 255
+        assert img.getpixel((round(lower_c[0]), round(lower_c[1]))) == 255
 
     def test_no_gap_all_bright(self):
         """Uniform bright image — no gap to split on — returns None."""
         img = Image.new("L", (400, 600), 255)
         bbox = (50, 50, 300, 400)
 
-        find_incisor_centroids(img, bbox)  # should not crash
+        assert find_incisor_centroids(img, bbox) is None
 
     def test_single_tooth_region(self):
         """Only upper teeth present, no lower — returns None."""
@@ -120,12 +122,13 @@ class TestFindIncisorCentroids:
 
         upper_c, lower_c = result
 
-        # Upper centroid Y should be in the central incisor region (100-160),
-        # NOT pulled down toward 170+ by the lateral molars
-        assert 100 <= upper_c[1] <= 165, (
+        # Upper point should land on the incisal edge of the central tooth,
+        # NOT be pulled down by the lateral molars.
+        assert upper_c[1] == 159, (
             f"Upper centroid Y={upper_c[1]:.1f} is outside incisor region 100-165; "
             "lateral molars are pulling it into the mouth cavity"
         )
+        assert lower_c[1] == 320
 
         # Upper centroid X should be near horizontal center
         # (septum avoidance picks one side, so allow range 100-300)
@@ -176,6 +179,71 @@ class TestFindIncisorCentroids:
             f"lower X={lower_c[0]:.1f}; should both be on the same side"
         )
 
+        assert img.getpixel((round(upper_c[0]), round(upper_c[1]))) == 255
+        assert img.getpixel((round(lower_c[0]), round(lower_c[1]))) == 255
+
+    def test_returned_points_are_real_mask_pixels_for_disconnected_shapes(self):
+        """The geometric mean may fall in a hole, so points are snapped to edges."""
+        img = Image.new("L", (400, 600), 0)
+        for x_start, x_end in ((100, 120), (180, 200)):
+            for y in range(100, 180):
+                for x in range(x_start, x_end):
+                    img.putpixel((x, y), 255)
+            for y in range(300, 380):
+                for x in range(x_start, x_end):
+                    img.putpixel((x, y), 255)
+
+        result = find_incisor_centroids(img, (0, 50, 400, 400))
+        assert result is not None
+        upper_c, lower_c = result
+        assert img.getpixel((round(upper_c[0]), round(upper_c[1]))) == 255
+        assert img.getpixel((round(lower_c[0]), round(lower_c[1]))) == 255
+        assert upper_c[0] == lower_c[0]
+
+    def test_side_choice_requires_support_after_split(self):
+        """One lower noise pixel cannot make a heavily populated side win."""
+        img = Image.new("L", (400, 600), 0)
+        # Large upper-left region but only one lower-left noise pixel.
+        for y in range(100, 180):
+            for x in range(100, 180):
+                img.putpixel((x, y), 255)
+        img.putpixel((150, 320), 255)
+
+        # Smaller, but properly paired, upper/lower regions on the right.
+        for y_start in (100, 300):
+            for y in range(y_start, y_start + 10):
+                for x in range(220, 230):
+                    img.putpixel((x, y), 255)
+
+        result = find_incisor_centroids(
+            img,
+            (0, 50, 400, 400),
+            min_pixels=50,
+        )
+        assert result is not None
+        upper_c, lower_c = result
+        assert upper_c[0] >= 220
+        assert lower_c[0] >= 220
+        assert img.getpixel((round(lower_c[0]), round(lower_c[1]))) == 255
+
+    def test_sloped_incisal_edges_return_a_real_paired_column(self):
+        """Moderate head roll must not move either point into the cavity."""
+        img = Image.new("L", (400, 600), 0)
+        for x in range(100, 300):
+            slope = (x - 100) // 8
+            for y in range(100 + slope, 160 + slope):
+                img.putpixel((x, y), 255)
+            for y in range(300 + slope, 360 + slope):
+                img.putpixel((x, y), 255)
+
+        result = find_incisor_centroids(img, (0, 50, 400, 400))
+        assert result is not None
+        upper_c, lower_c = result
+        assert upper_c[0] == lower_c[0]
+        assert img.getpixel((round(upper_c[0]), round(upper_c[1]))) == 255
+        assert img.getpixel((round(lower_c[0]), round(lower_c[1]))) == 255
+        assert 135 <= lower_c[1] - upper_c[1] <= 145
+
 
 class TestSampleDepthAtPoint:
     def test_coordinate_scaling(self):
@@ -219,6 +287,38 @@ class TestSampleDepthAtPoint:
         # This maps to (0,0) with kernel_size=1, should work
         result = sample_depth_at_point(depth, 0, 0, 1, 1, kernel_size=1)
         assert result == 50
+
+    def test_last_photo_pixel_maps_to_last_depth_pixel(self):
+        depth = Image.new("L", (10, 10), 0)
+        depth.putpixel((9, 9), 231)
+
+        result = sample_depth_at_point(depth, 99, 99, 100, 100, kernel_size=1)
+        assert result == 231
+
+    def test_support_mask_rejects_depth_from_mouth_cavity(self):
+        depth = Image.new("L", (10, 10), 240)
+        teeth = Image.new("L", (100, 100), 0)
+
+        # Only depth pixels centred on the upper tooth carry the desired value.
+        # Unmasked sampling at the boundary sees mostly the cavity value.
+        for y in range(50):
+            for x in range(40, 61):
+                teeth.putpixel((x, y), 255)
+        for y in range(3, 5):
+            for x in range(4, 7):
+                depth.putpixel((x, y), 110)
+
+        result = sample_depth_at_point(
+            depth,
+            50,
+            49,
+            100,
+            100,
+            kernel_size=3,
+            support_mask=teeth,
+            inward_y=-1,
+        )
+        assert result == 110
 
 
 class TestDepthRawToDistanceCm:

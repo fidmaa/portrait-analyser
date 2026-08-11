@@ -98,6 +98,9 @@ class TestMeasureFilteredSurfaceLength:
         depthmap = Image.new("L", (photo_width, photo_height), 100)
         filtered = median_filter_depthmap(depthmap)
 
+        # float_max=4.0 puts depth 100 at ~53 cm. With the earlier float_max=2.0
+        # it landed at ~92 cm, outside the calibration polynomial's trustworthy
+        # range, so pixel_to_mm() now correctly refuses to convert it.
         lengths = [
             measure_filtered_surface_length(
                 filtered,
@@ -105,7 +108,7 @@ class TestMeasureFilteredSurfaceLength:
                 photo_width,
                 photo_height,
                 float_min=0.5,
-                float_max=2.0,
+                float_max=4.0,
             )
             for step in range(2, 8)
         ]

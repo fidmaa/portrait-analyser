@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-11
+
 ### Added
 
 - `local_surface` module with robust local-plane detrending and pose-invariant
@@ -27,6 +29,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added FaceMesh-scaled anatomical neck-search bounds and changed bounded
   skin-width selection from a global minimum to the first median-smoothed,
   prominent local basin, preventing collar/shoulder dropouts from winning.
+
+### Fixed
+
+- `find_incisor_centroids()` now measures robust, paired points on the facing
+  incisal edges instead of whole-tooth centroids. It requires a genuine dark
+  gap, validates support after choosing a side, rejects boundary outliers, and
+  always returns actual teeth-mask pixels in one shared column.
+- Incisor depth sampling can be restricted to the teeth matte and shifted one
+  native depth pixel into each tooth, avoiding values from the mouth cavity.
+- Photo-to-depth coordinate scaling now maps both image endpoints exactly.
 
 ## [0.5.0] - 2026-08-11
 

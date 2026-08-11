@@ -11,6 +11,8 @@ from .exceptions import MultipleFacesDetected, NoFacesDetected
 
 @dataclass
 class IncisorMeasurement:
+    # Historical field names retained for API compatibility.  The points are
+    # robust representatives of the facing incisal edges, not whole-tooth means.
     upper_centroid: tuple[float, float]  # (x, y) in photo/teethmap coordinates
     lower_centroid: tuple[float, float]  # (x, y) in photo/teethmap coordinates
     upper_depth_raw: int | None = None  # raw pixel value from depth map
@@ -747,18 +749,160 @@ def find_incisor_distance_teeth(
     return (x, y1, x, y2)
 
 
-def _pick_side(xs, ys, x_midline, use_left):
-    """Keep only the left or right half of pixel coordinates.
+def _true_runs(values):
+    """Yield half-open runs where a one-dimensional boolean array is true."""
+    run_start = None
+    for index, value in enumerate(values):
+        if value and run_start is None:
+            run_start = index
+        elif not value and run_start is not None:
+            yield run_start, index
+            run_start = None
+    if run_start is not None:
+        yield run_start, len(values)
 
-    Used to avoid the septum (dark gap between central incisors).
-    The caller decides which side to use so that upper and lower
-    centroids are on the same side (left-to-left or right-to-right).
+
+def _find_incisor_gap(
+    mask,
+    min_pixels,
+    min_gap_height,
+    max_gap_foreground_fraction,
+):
+    """Find the widest low-confidence horizontal band between tooth regions.
+
+    ``mask`` is the central part of the teeth matte.  A valid gap must have
+    enough foreground support both above and below it; this prevents one
+    continuous bright region from being split at the bounding-box midpoint.
     """
-    if use_left:
-        mask = xs < x_midline
-    else:
-        mask = xs >= x_midline
-    return xs[mask], ys[mask]
+    if mask.size == 0 or mask.shape[1] == 0:
+        return None
+
+    row_counts = numpy.count_nonzero(mask, axis=1)
+    if not numpy.any(row_counts):
+        return None
+
+    # Scale the allowed gap noise to the strongest tooth row, not the full ROI
+    # width.  Otherwise a valid but narrower lower incisor could itself be
+    # classified as gap merely because the upper incisor is much wider.
+    max_gap_foreground = int(numpy.max(row_counts) * max_gap_foreground_fraction)
+    low_foreground_rows = row_counts <= max_gap_foreground
+    tooth_rows = numpy.flatnonzero(~low_foreground_rows)
+    if len(tooth_rows) < 2:
+        return None
+
+    first_tooth_row = int(tooth_rows[0])
+    last_tooth_row = int(tooth_rows[-1])
+    candidates = []
+    for start, end in _true_runs(low_foreground_rows):
+        if start <= first_tooth_row or end - 1 >= last_tooth_row:
+            continue
+        if end - start < min_gap_height:
+            continue
+
+        upper_support = int(numpy.count_nonzero(mask[:start]))
+        lower_support = int(numpy.count_nonzero(mask[end:]))
+        if upper_support < min_pixels or lower_support < min_pixels:
+            continue
+
+        # Prefer the widest genuine gap.  When two gaps have the same width,
+        # the one nearest the vertical centre is the more plausible mouth gap.
+        centre_offset = abs((start + end) / 2.0 - mask.shape[0] / 2.0)
+        candidates.append((end - start, -centre_offset, start, end))
+
+    if not candidates:
+        return None
+
+    _, _, start, end = max(candidates)
+    return start, end
+
+
+def _robust_edge_pair(xs, upper_ys, lower_ys, min_edge_columns):
+    """Return a real paired edge point nearest the robust boundary centroid."""
+    xs = numpy.asarray(xs, dtype=float)
+    upper_ys = numpy.asarray(upper_ys, dtype=float)
+    lower_ys = numpy.asarray(lower_ys, dtype=float)
+    if len(xs) < min_edge_columns:
+        return None
+
+    keep = numpy.ones(len(xs), dtype=bool)
+    for values in (upper_ys, lower_ys, lower_ys - upper_ys):
+        median = float(numpy.median(values))
+        mad = float(numpy.median(numpy.abs(values - median)))
+        tolerance = max(2.0, 3.0 * 1.4826 * mad)
+        keep &= numpy.abs(values - median) <= tolerance
+
+    if numpy.count_nonzero(keep) < min_edge_columns:
+        return None
+
+    xs = xs[keep]
+    upper_ys = upper_ys[keep]
+    lower_ys = lower_ys[keep]
+
+    # The mathematical centroid of a curved/disconnected boundary may lie in
+    # the dark mouth cavity.  Snap it to the nearest *paired* boundary sample,
+    # so both returned points are actual teeth pixels in the same column.
+    target_x = float(numpy.mean(xs))
+    target_upper_y = float(numpy.mean(upper_ys))
+    target_lower_y = float(numpy.mean(lower_ys))
+    costs = (
+        (xs - target_x) ** 2
+        + (upper_ys - target_upper_y) ** 2
+        + (lower_ys - target_lower_y) ** 2
+    )
+    best = int(numpy.argmin(costs))
+    x = float(xs[best])
+    points = (x, float(upper_ys[best])), (x, float(lower_ys[best]))
+    return int(len(xs)), points
+
+
+def _edge_pair_for_side(
+    mask,
+    x_offset,
+    side_start,
+    side_end,
+    gap_start,
+    gap_end,
+    min_pixels,
+    min_edge_columns,
+):
+    """Build a representative upper/lower incisal-edge pair for one side."""
+    side = mask[:, side_start:side_end]
+    if side.size == 0:
+        return None
+
+    upper = side[:gap_start]
+    lower = side[gap_end:]
+    upper_support = int(numpy.count_nonzero(upper))
+    lower_support = int(numpy.count_nonzero(lower))
+    if upper_support < min_pixels or lower_support < min_pixels:
+        return None
+
+    xs = []
+    upper_ys = []
+    lower_ys = []
+    for local_x in range(side.shape[1]):
+        upper_rows = numpy.flatnonzero(upper[:, local_x])
+        lower_rows = numpy.flatnonzero(lower[:, local_x])
+        if len(upper_rows) == 0 or len(lower_rows) == 0:
+            continue
+        xs.append(x_offset + side_start + local_x)
+        upper_ys.append(int(upper_rows[-1]))
+        lower_ys.append(gap_end + int(lower_rows[0]))
+
+    robust_result = _robust_edge_pair(xs, upper_ys, lower_ys, min_edge_columns)
+    if robust_result is None:
+        return None
+    robust_column_count, points = robust_result
+
+    # Rank sides by paired-column coverage first and balanced tooth support
+    # second.  A side with one noisy lower pixel must not beat a well-supported
+    # upper/lower pair merely because its upper tooth region is large.
+    score = (
+        robust_column_count,
+        min(upper_support, lower_support),
+        upper_support + lower_support,
+    )
+    return score, points
 
 
 def find_incisor_centroids(
@@ -768,110 +912,135 @@ def find_incisor_centroids(
     margin_x=0.5,
     min_pixels=50,
     centroid_margin_x=0.5,
+    min_gap_fraction=0.01,
+    max_gap_foreground_fraction=0.1,
+    min_edge_columns=5,
 ) -> tuple[tuple[float, float], tuple[float, float]] | None:
-    """Find centroids of upper and lower incisor surfaces.
+    """Find representative points on facing upper/lower incisal edges.
 
-    Returns ((upper_cx, upper_cy), (lower_cx, lower_cy)) in teethmap coordinates,
-    or None if centroids cannot be determined.
+    The public name and return shape retain the historical ``centroid`` API,
+    but the points are now derived from the facing edges rather than the full
+    visible tooth surfaces.  Boundary samples are robustly centred and then
+    snapped to a real paired mask column.  This measures the inter-incisal gap
+    and guarantees that depth is sampled on tooth pixels, not in the cavity.
+
+    Returns ``((upper_x, upper_y), (lower_x, lower_y))`` in teethmap
+    coordinates, or ``None`` when two separated, sufficiently supported
+    incisal surfaces cannot be identified.
     """
-    bb_x, bb_y, bb_w, bb_h = bounding_box_teeth
-    y_mid = bb_y + bb_h / 2
+    if not 0 < margin_x <= 1 or not 0 < centroid_margin_x <= 1:
+        raise ValueError("margin fractions must be in the (0, 1] range")
+    if min_pixels < 1 or min_edge_columns < 1:
+        raise ValueError("minimum support values must be positive")
+    if not 0 <= max_gap_foreground_fraction < 1:
+        raise ValueError("max_gap_foreground_fraction must be in the [0, 1) range")
+    if min_gap_fraction < 0:
+        raise ValueError("min_gap_fraction must not be negative")
 
-    # Determine the gap midline using median of per-column midpoints
-    x_start = int(bb_x + bb_w / 2 - margin_x * bb_w / 2)
-    x_end = int(bb_x + bb_w / 2 + margin_x * bb_w / 2)
-    min_he = bb_y
-    max_he = bb_y + bb_h
-
-    gap_midpoints = []
-    for x in range(x_start, x_end):
-        upper_y = y_mid
-        while upper_y > min_he:
-            upper_y -= 1
-            if teethmap.getpixel((x, int(upper_y))) >= threshold:
-                break
-        else:
-            continue
-
-        lower_y = y_mid
-        while lower_y < max_he:
-            lower_y += 1
-            if teethmap.getpixel((x, int(lower_y))) >= threshold:
-                break
-        else:
-            continue
-
-        if upper_y > min_he and lower_y < max_he:
-            gap_midpoints.append((upper_y + lower_y) / 2)
-
-    if not gap_midpoints:
+    bb_x, bb_y, bb_w, bb_h = (int(value) for value in bounding_box_teeth)
+    image_width, image_height = teethmap.size
+    bb_end_x = min(image_width, bb_x + bb_w)
+    bb_end_y = min(image_height, bb_y + bb_h)
+    bb_x = max(0, bb_x)
+    bb_y = max(0, bb_y)
+    bb_w = bb_end_x - bb_x
+    bb_h = bb_end_y - bb_y
+    if bb_w < 2 or bb_h < 2:
         return None
 
-    gap_midline = sorted(gap_midpoints)[len(gap_midpoints) // 2]  # median
-
-    # Extract ROI restricted to central incisor strip (excludes lateral teeth
-    # that form an arch and would pull centroids into the mouth cavity)
     arr = numpy.array(teethmap)
+    if arr.ndim > 2:
+        arr = arr[..., 0]
+
+    # Locate a real low-confidence band between upper and lower teeth using a
+    # central strip.  This replaces the old unconditional split at bbox/2.
+    gap_x_start = int(bb_x + bb_w / 2 - margin_x * bb_w / 2)
+    gap_x_end = int(bb_x + bb_w / 2 + margin_x * bb_w / 2)
+    gap_mask = arr[bb_y:bb_end_y, gap_x_start:gap_x_end] >= threshold
+    min_gap_height = max(2, int(round(bb_h * min_gap_fraction)))
+    gap = _find_incisor_gap(
+        gap_mask,
+        min_pixels=min_pixels,
+        min_gap_height=min_gap_height,
+        max_gap_foreground_fraction=max_gap_foreground_fraction,
+    )
+    if gap is None:
+        return None
+    gap_start, gap_end = gap
+
+    # Restrict edge measurement to the central incisors.  Lateral teeth form
+    # an arch and would otherwise pull the representative points sideways.
     cx_start = int(bb_x + bb_w / 2 - centroid_margin_x * bb_w / 2)
     cx_end = int(bb_x + bb_w / 2 + centroid_margin_x * bb_w / 2)
-    roi = arr[bb_y : bb_y + bb_h, cx_start:cx_end]
-
-    ys, xs = numpy.where(roi >= threshold)
-    if len(ys) == 0:
+    mask = arr[bb_y:bb_end_y, cx_start:cx_end] >= threshold
+    if mask.size == 0:
         return None
 
-    # Convert to teethmap coordinates
-    abs_xs = xs + cx_start
-    abs_ys = ys + bb_y
+    side_midpoint = mask.shape[1] // 2
+    candidates = []
+    for side_start, side_end in ((0, side_midpoint), (side_midpoint, mask.shape[1])):
+        candidate = _edge_pair_for_side(
+            mask,
+            x_offset=cx_start,
+            side_start=side_start,
+            side_end=side_end,
+            gap_start=gap_start,
+            gap_end=gap_end,
+            min_pixels=min_pixels,
+            min_edge_columns=min_edge_columns,
+        )
+        if candidate is not None:
+            candidates.append(candidate)
 
-    # Split into upper and lower groups
-    upper_mask = abs_ys < gap_midline
-    lower_mask = abs_ys > gap_midline
-
-    upper_xs = abs_xs[upper_mask]
-    upper_ys = abs_ys[upper_mask]
-    lower_xs = abs_xs[lower_mask]
-    lower_ys = abs_ys[lower_mask]
-
-    if len(upper_xs) < min_pixels or len(lower_xs) < min_pixels:
+    if not candidates:
         return None
 
-    # Avoid the septum (dark gap between central incisors): split pixels
-    # into left/right halves at the X midline, then keep the same side for
-    # both upper and lower groups. This ensures the centroid pair measures
-    # left-upper to left-lower (or right to right), not across the septum.
-    # The side is chosen by total pixel count across both groups.
-    x_midline = (cx_start + cx_end) / 2
-
-    upper_left = numpy.sum(upper_xs < x_midline)
-    upper_right = numpy.sum(upper_xs >= x_midline)
-    lower_left = numpy.sum(lower_xs < x_midline)
-    lower_right = numpy.sum(lower_xs >= x_midline)
-
-    use_left = (upper_left + lower_left) >= (upper_right + lower_right)
-
-    upper_xs, upper_ys = _pick_side(upper_xs, upper_ys, x_midline, use_left)
-    lower_xs, lower_ys = _pick_side(lower_xs, lower_ys, x_midline, use_left)
-
-    if len(upper_xs) == 0 or len(lower_xs) == 0:
-        return None
-
-    upper_centroid = (float(numpy.mean(upper_xs)), float(numpy.mean(upper_ys)))
-    lower_centroid = (float(numpy.mean(lower_xs)), float(numpy.mean(lower_ys)))
-
-    return (upper_centroid, lower_centroid)
+    _, (upper_point, lower_point) = max(candidates, key=lambda item: item[0])
+    return (
+        (upper_point[0], upper_point[1] + bb_y),
+        (lower_point[0], lower_point[1] + bb_y),
+    )
 
 
 def sample_depth_at_point(
-    depthmap, point_x, point_y, photo_width, photo_height, kernel_size=3
+    depthmap,
+    point_x,
+    point_y,
+    photo_width,
+    photo_height,
+    kernel_size=3,
+    support_mask=None,
+    support_threshold=200,
+    inward_y=0,
 ) -> int | None:
     """Sample depth map at a photo-space coordinate using median filtering.
 
-    Translates from photo-space to depth-map-space and returns the median
-    value of a kernel_size x kernel_size region.
+    Translates from photo-space to depth-map-space and returns the median value
+    of a ``kernel_size`` square.  When ``support_mask`` is supplied, only depth
+    pixels whose centres map to foreground mask pixels are included.  An
+    ``inward_y`` offset in depth pixels can move an incisal-edge sample into the
+    tooth surface (negative for an upper tooth, positive for a lower tooth).
     """
-    depth_x = round(point_x * depthmap.width / photo_width)
-    depth_y = round(point_y * depthmap.height / photo_height)
+    if kernel_size < 1 or kernel_size % 2 == 0:
+        raise ValueError("kernel_size must be a positive odd number")
+    if photo_width < 1 or photo_height < 1 or depthmap.width < 1 or depthmap.height < 1:
+        return None
+    if not 0 <= point_x <= photo_width - 1 or not 0 <= point_y <= photo_height - 1:
+        return None
+
+    # Match image endpoints exactly.  Multiplying by depthmap.width/photo_width
+    # maps the last valid photo pixel beyond the last depth pixel after rounding.
+    depth_x = (
+        0
+        if photo_width == 1
+        else round(point_x * (depthmap.width - 1) / (photo_width - 1))
+    )
+    depth_y = (
+        0
+        if photo_height == 1
+        else round(point_y * (depthmap.height - 1) / (photo_height - 1))
+    )
+    depth_y += int(inward_y)
 
     half = kernel_size // 2
     values = []
@@ -880,6 +1049,23 @@ def sample_depth_at_point(
             sx = depth_x + dx
             sy = depth_y + dy
             if 0 <= sx < depthmap.width and 0 <= sy < depthmap.height:
+                if support_mask is not None:
+                    mask_x = (
+                        0
+                        if depthmap.width == 1
+                        else round(sx * (support_mask.width - 1) / (depthmap.width - 1))
+                    )
+                    mask_y = (
+                        0
+                        if depthmap.height == 1
+                        else round(sy * (support_mask.height - 1) / (depthmap.height - 1))
+                    )
+                    mask_value = support_mask.getpixel((mask_x, mask_y))
+                    if isinstance(mask_value, tuple):
+                        mask_value = mask_value[0]
+                    if mask_value < support_threshold:
+                        continue
+
                 px = depthmap.getpixel((sx, sy))
                 # Multi-channel depth maps (e.g. RGB): take first channel
                 if isinstance(px, tuple):
