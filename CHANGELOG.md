@@ -4,7 +4,7 @@ All notable changes to portrait-analyser are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [0.5.0] - 2026-08-11
 
 ### Added
 
@@ -14,6 +14,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   independently built the same primitives for its `surface_vector_filtered`
   measurement) so both the GUI and this library share one, tested
   implementation.
+- `.github/workflows/release.yml`: publishes to PyPI via Trusted Publishing
+  (OIDC) on GitHub Release publish. No API token stored or required. Needs a
+  one-time Trusted Publisher entry added on PyPI's project settings
+  (owner=fidmaa, repository=portrait-analyser, workflow=release.yml,
+  environment=pypi).
 
 ### Changed
 
