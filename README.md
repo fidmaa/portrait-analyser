@@ -19,6 +19,7 @@ iPhone Portrait Mode photos (TrueDepth front camera) carry more than a picture: 
 - **Mouth opening measurement** — MediaPipe FaceMesh-based fallback for patients without visible upper teeth
 - **Neck & chin detection** — three independent strategies depending on what's available: MediaPipe Pose (shoulder/nose interpolation), MediaPipe Selfie Segmentation (silhouette width profile), or a dual-mask approach combining the skin matte, depth map, and hair mask
 - **3D neck circumference** — dense arc integration over the depth map to estimate physical neck circumference, not just a 2D collar-line width
+- **Thyromental distance** — physical chin-to-neck-midpoint measurement, a standard airway/intubation-difficulty screening metric
 - **CLI diagnostic tool** (`analyse-portrait`) — inspect a HEIC file's raw container, EXIF, depth metadata, and segmentation mattes from the command line
 
 ## Requirements
@@ -157,6 +158,10 @@ Both extend `Rectangle` (attributes: `x`, `y`, `width`, `height`, `center_x`, `c
 - `estimate_face_from_skinmap(skinmap, threshold=1) -> tuple[int, int, int, int] | None` -- estimates a synthetic face bounding box from the skin segmentation map alone, for when no OpenCV face detection is available.
 - `NeckMeasurement` -- dataclass with `neck_y`, `left_x`, `right_x` (photo-space), `arc_points_3d` (physical mm coordinates), `arc_points_photo` (pixel coordinates, for overlay painting).
 
+### Thyromental distance (`tmd` module)
+
+- `compute_tmd_3d(chin_coord, neck_coord, chin_depth_raw, neck_depth_raw, float_min, float_max, image_width, image_height) -> tuple[float, float, float] | None` -- computes the 3D physical distance between chin (mentum) and neck midpoint (a standard airway/intubation-difficulty screening measure), returning `(distance_3d_mm, chin_z_cm, neck_z_cm)`.
+
 ### Robust surface-distance measurement (`depth_sampling` module)
 
 - `median_filter_depthmap(depthmap, size=3) -> Image` -- returns a same-size, single-channel median-filtered copy of a depth map, to be sampled once and reused across many points.
@@ -187,6 +192,10 @@ uv run pytest
 # Build package
 uv build
 ```
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## License
 
