@@ -4,6 +4,18 @@ All notable changes to portrait-analyser are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+
+- `find_incisor_centroids()` now measures robust, paired points on the facing
+  incisal edges instead of whole-tooth centroids. It requires a genuine dark
+  gap, validates support after choosing a side, rejects boundary outliers, and
+  always returns actual teeth-mask pixels in one shared column.
+- Incisor depth sampling can be restricted to the teeth matte and shifted one
+  native depth pixel into each tooth, avoiding values from the mouth cavity.
+- Photo-to-depth coordinate scaling now maps both image endpoints exactly.
+
 ## [0.5.0] - 2026-08-11
 
 ### Added
