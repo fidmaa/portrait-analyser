@@ -251,15 +251,20 @@ class TestDepthRawToDistanceCm:
 
 class TestPixelToMm:
     def test_conversion(self):
-        """Pixel to mm conversion at a known distance."""
+        """Pixel to mm conversion at a known distance, centred on the image."""
         # At 25 cm, pixels_per_mm gives some value
-        # pixel_to_mm(100, 25) = 100 / pixels_per_mm(25)
+        # pixel_to_mm(100, 25, image_dimension) = (100 - image_dimension/2) / pixels_per_mm(25)
         from portrait_analyser.incisor import pixels_per_mm_at_distance
 
         ppmm = pixels_per_mm_at_distance(25)
-        result = pixel_to_mm(100, 25)
+        result = pixel_to_mm(100, 25, image_dimension=2320)
         assert result is not None
-        assert abs(result - 100.0 / ppmm) < 0.001
+        assert abs(result - (100.0 - 2320 / 2.0) / ppmm) < 0.001
+
+    def test_image_centre_maps_to_zero(self):
+        """The principal point (image centre) always converts to 0mm."""
+        result = pixel_to_mm(1160, 25, image_dimension=2320)
+        assert abs(result) < 0.001
 
 
 class TestVectorLength3d:
@@ -291,6 +296,8 @@ class TestComputeIncisorDistance3d:
             lower_depth_raw=200,
             float_min=0.5,
             float_max=2.0,
+            image_width=2320,
+            image_height=3087,
         )
         assert result is not None
         distance_3d_mm, upper_cm, lower_cm = result
@@ -307,6 +314,8 @@ class TestComputeIncisorDistance3d:
             lower_depth_raw=200,
             float_min=0.5,
             float_max=2.0,
+            image_width=2320,
+            image_height=3087,
         )
         assert result is not None
         distance_3d_mm = result[0]
@@ -322,6 +331,8 @@ class TestComputeIncisorDistance3d:
             lower_depth_raw=128,
             float_min=0.0,
             float_max=0.0,
+            image_width=2320,
+            image_height=3087,
         )
         assert result is None
 

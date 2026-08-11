@@ -82,6 +82,8 @@ def compute_mouth_measurement_from_facemesh(
             lower_depth_raw,
             float(float_min),
             float(float_max),
+            photo_w,
+            photo_h,
         )
         if result_3d is not None:
             distance_3d_mm, upper_distance_cm, lower_distance_cm = result_3d

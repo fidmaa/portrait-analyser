@@ -206,6 +206,8 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                         ld_lower,
                         float(float_min),
                         float(float_max),
+                        photo_w,
+                        photo_h,
                     )
                     if legacy_3d is not None:
                         incisor_distance_3d_mm = legacy_3d[0]
@@ -244,6 +246,8 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                             lower_depth_raw,
                             float(float_min),
                             float(float_max),
+                            photo_w,
+                            photo_h,
                         )
                         if result_3d is not None:
                             distance_3d_mm, upper_distance_cm, lower_distance_cm = (
