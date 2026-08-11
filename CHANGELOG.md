@@ -4,6 +4,27 @@ All notable changes to portrait-analyser are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- New `depth_sampling` module: `median_filter_depthmap()`, `bilinear_sample()`,
+  `sample_points_along_line()`, `sample_filtered_depth()`, and
+  `measure_filtered_surface_length()`. Moved here from fidmaa-gui (which had
+  independently built the same primitives for its `surface_vector_filtered`
+  measurement) so both the GUI and this library share one, tested
+  implementation.
+
+### Changed
+
+- `compute_neck_circumference()`'s arc-length loop now reads depth via a
+  once-per-call median-filtered, bilinearly-sampled depth map instead of
+  `face.sample_depth_at_point()`'s nearest-neighbour + integer-kernel median.
+  This smooths TrueDepth sensor noise before it can accumulate across the
+  many points walked along the neck arc — the same class of fix as the
+  principal-point correction below, applied to sampling instead of
+  positioning. The sag auto-detection step (`_find_best_sag`) is unchanged.
+
 ## [0.4.0] - 2026-08-11
 
 ### Fixed
