@@ -408,8 +408,8 @@ def compute_neck_width_3d(
             continue
 
         # Convert pixel coords to mm at this depth
-        x_mm = pixel_to_mm(x, z_cm)
-        y_mm = pixel_to_mm(float(neck_y), z_cm)
+        x_mm = pixel_to_mm(x, z_cm, photo_width)
+        y_mm = pixel_to_mm(float(neck_y), z_cm, photo_height)
         if x_mm is None or y_mm is None:
             continue
 

@@ -48,20 +48,30 @@ def pixels_per_mm_at_distance(distance_cm):
     )
 
 
-def pixel_to_mm(pixel_coord, distance_cm):
+def pixel_to_mm(pixel_coord, distance_cm, image_dimension):
     """Convert a pixel coordinate to physical millimeters at a given distance.
+
+    The pinhole camera model requires coordinates measured from the optical
+    axis (the principal point, approximated here as the image centre), not
+    from the top-left corner. Without this correction, points at different
+    depths pick up a phantom lateral displacement proportional to their
+    distance from the image centre and the depth difference between them.
 
     The pixel coordinate must be in original (full-resolution) image space,
     matching the calibration polynomial's expected resolution (~2300x3000).
 
-    :param pixel_coord: coordinate in pixels (original image space)
+    :param pixel_coord: coordinate in pixels (original image space, from top-left)
     :param distance_cm: distance from camera in centimeters
-    :returns: physical distance in millimeters, or None if conversion fails
+    :param image_dimension: full image width (for an x coordinate) or height
+        (for a y coordinate) in pixels, used to locate the principal point
+    :returns: physical distance in millimeters relative to the optical axis,
+        or None if conversion fails
     """
     ppmm = pixels_per_mm_at_distance(distance_cm)
     if ppmm == 0:
         return None
-    return pixel_coord / ppmm
+    centred_coord = pixel_coord - image_dimension / 2.0
+    return centred_coord / ppmm
 
 
 def vector_length_3d(x1, y1, z1, x2, y2, z2):
@@ -76,6 +86,8 @@ def compute_incisor_distance_3d(
     lower_depth_raw,
     float_min,
     float_max,
+    image_width,
+    image_height,
 ):
     """Compute 3D Euclidean distance between upper and lower incisor centroids.
 
@@ -88,6 +100,8 @@ def compute_incisor_distance_3d(
     :param lower_depth_raw: raw depth pixel value at lower centroid
     :param float_min: EXIF FloatMinValue
     :param float_max: EXIF FloatMaxValue
+    :param image_width: full photo width in pixels (principal point reference)
+    :param image_height: full photo height in pixels (principal point reference)
     :returns: (distance_3d_mm, upper_distance_cm, lower_distance_cm) or None
     """
     upper_z_cm = depth_raw_to_distance_cm(upper_depth_raw, float_min, float_max)
@@ -96,10 +110,10 @@ def compute_incisor_distance_3d(
     if upper_z_cm is None or lower_z_cm is None:
         return None
 
-    upper_x_mm = pixel_to_mm(upper_centroid[0], upper_z_cm)
-    upper_y_mm = pixel_to_mm(upper_centroid[1], upper_z_cm)
-    lower_x_mm = pixel_to_mm(lower_centroid[0], lower_z_cm)
-    lower_y_mm = pixel_to_mm(lower_centroid[1], lower_z_cm)
+    upper_x_mm = pixel_to_mm(upper_centroid[0], upper_z_cm, image_width)
+    upper_y_mm = pixel_to_mm(upper_centroid[1], upper_z_cm, image_height)
+    lower_x_mm = pixel_to_mm(lower_centroid[0], lower_z_cm, image_width)
+    lower_y_mm = pixel_to_mm(lower_centroid[1], lower_z_cm, image_height)
 
     if any(v is None for v in (upper_x_mm, upper_y_mm, lower_x_mm, lower_y_mm)):
         return None

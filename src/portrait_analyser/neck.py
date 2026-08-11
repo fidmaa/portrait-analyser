@@ -282,8 +282,8 @@ def compute_neck_circumference(
             continue
 
         # Convert pixel coordinates to physical mm at this depth
-        x_mm = pixel_to_mm(sx, z_cm)
-        y_mm = pixel_to_mm(sample_y, z_cm)
+        x_mm = pixel_to_mm(sx, z_cm, photo_width)
+        y_mm = pixel_to_mm(sample_y, z_cm, photo_height)
         if x_mm is None or y_mm is None:
             continue
 
