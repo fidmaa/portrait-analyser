@@ -4,6 +4,7 @@ Uses synthetic PIL Images — no HEIC files needed.
 """
 
 import numpy
+import pytest
 from PIL import Image
 
 from portrait_analyser.face import (
@@ -16,6 +17,7 @@ from portrait_analyser.neck import (
     NeckMeasurement,
     compute_neck_circumference,
     estimate_face_from_skinmap,
+    find_stable_depth_x_from_edge,
 )
 
 
@@ -137,6 +139,56 @@ class TestNeckMeasurementDataclass:
             circumference_multiplier=3.0,
         )
         assert m.circumference_multiplier == 3.0
+
+
+class TestStableDepthEdge:
+    def test_walks_past_silhouette_wall_to_first_stable_patch(self):
+        values = numpy.full(40, 120, dtype=numpy.uint8)
+        values[10:15] = [210, 185, 160, 138, 122]
+        depthmap = Image.fromarray(numpy.tile(values, (20, 1)), mode="L")
+
+        point_x = find_stable_depth_x_from_edge(
+            depthmap,
+            edge_x=10,
+            y=10,
+            direction=1,
+            photo_width=40,
+            photo_height=20,
+            max_distance=20,
+        )
+
+        assert 15 <= point_x <= 18
+
+    def test_right_edge_search_is_symmetric(self):
+        values = numpy.full(40, 120, dtype=numpy.uint8)
+        values[25:30] = [122, 138, 160, 185, 210]
+        depthmap = Image.fromarray(numpy.tile(values, (20, 1)), mode="L")
+
+        point_x = find_stable_depth_x_from_edge(
+            depthmap,
+            edge_x=29,
+            y=10,
+            direction=-1,
+            photo_width=40,
+            photo_height=20,
+            max_distance=20,
+        )
+
+        assert 21 <= point_x <= 24
+
+    def test_invalid_direction_is_rejected(self):
+        depthmap = Image.new("L", (20, 20), 120)
+
+        with pytest.raises(ValueError, match="direction"):
+            find_stable_depth_x_from_edge(
+                depthmap,
+                edge_x=5,
+                y=10,
+                direction=0,
+                photo_width=20,
+                photo_height=20,
+                max_distance=10,
+            )
 
 
 class TestComputeNeckCircumference:
@@ -495,7 +547,7 @@ class TestComputeNeckCircumference:
         )
 
     def test_edge_inset_avoids_extreme_edges(self):
-        """Arc points should be inset from raw skin edges by 5%."""
+        """Arc points should be adaptively inset from raw skin edges."""
         width, height, face_location, skinmap = self._face_and_skin()
 
         # Create a depth map where extreme left/right edges near the neck
@@ -540,6 +592,9 @@ class TestComputeNeckCircumference:
         assert max(arc_xs) < raw_right, (
             f"Rightmost arc point {max(arc_xs)} should be inset from raw edge {raw_right}"
         )
+
+        assert probe.mask_left_x < probe.left_x
+        assert probe.mask_right_x > probe.right_x
 
     def test_no_face_location_uses_fallback(self):
         """Call with face_location=None — should auto-estimate from skin map."""

@@ -9,6 +9,7 @@ so that a GUI can paint the sampled arc.
 import math
 from dataclasses import dataclass
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 from .depth_sampling import median_filter_depthmap, sample_filtered_depth
@@ -54,6 +55,105 @@ class NeckMeasurement:
 
     # The multiplier used (kept explicit so it can be tuned)
     circumference_multiplier: float = 2.7
+
+    # Raw silhouette coordinates before depth-stability correction.
+    mask_left_x: int | None = None
+    mask_right_x: int | None = None
+
+
+def find_stable_depth_x_from_edge(
+    depthmap,
+    edge_x,
+    y,
+    direction,
+    photo_width,
+    photo_height,
+    max_distance,
+    stability_run=4,
+):
+    """Find the first stable depth patch while walking in from a skin edge.
+
+    ``direction`` is ``1`` at the left edge and ``-1`` at the right edge.
+    Sampling advances by approximately one native depth pixel. The returned
+    coordinate is centred within the first run whose consecutive depth changes
+    match the quiet part of the profile, avoiding the TrueDepth silhouette wall.
+    """
+    filtered_depthmap = median_filter_depthmap(depthmap, size=3)
+    return _find_stable_depth_x_from_edge(
+        filtered_depthmap,
+        edge_x,
+        y,
+        direction,
+        photo_width,
+        photo_height,
+        max_distance,
+        stability_run,
+    )
+
+
+def _find_stable_depth_x_from_edge(
+    filtered_depthmap,
+    edge_x,
+    y,
+    direction,
+    photo_width,
+    photo_height,
+    max_distance,
+    stability_run,
+):
+    if direction not in (-1, 1):
+        raise ValueError("direction must be -1 or 1")
+    if stability_run < 3:
+        raise ValueError("stability_run must be at least 3")
+    if max_distance <= 0:
+        return None
+
+    native_step = max(1.0, (photo_width - 1) / max(1, filtered_depthmap.width - 1))
+    sample_distances = list(np.arange(0.0, max_distance + native_step * 0.25, native_step))
+    if sample_distances[-1] < max_distance:
+        sample_distances.append(float(max_distance))
+    positions = [
+        edge_x + direction * distance for distance in sample_distances
+    ]
+    values = [
+        sample_filtered_depth(
+            filtered_depthmap,
+            position,
+            y,
+            photo_width,
+            photo_height,
+        )
+        for position in positions
+    ]
+
+    differences = [
+        abs(right - left)
+        for left, right in zip(values, values[1:])
+        if left is not None and right is not None
+    ]
+    if len(differences) < stability_run:
+        return None
+
+    sorted_differences = sorted(differences)
+    quiet_differences = sorted_differences[: max(2, len(sorted_differences) // 2)]
+    quiet_median = float(np.median(quiet_differences))
+    quiet_mad = float(np.median(np.abs(np.asarray(quiet_differences) - quiet_median)))
+    stable_change = max(0.75, quiet_median + 3.0 * 1.4826 * quiet_mad)
+
+    for start in range(1, len(values) - stability_run + 1):
+        window = values[start : start + stability_run]
+        if any(value is None for value in window):
+            continue
+        window_differences = [
+            abs(right - left) for left, right in zip(window, window[1:])
+        ]
+        if max(window_differences, default=0.0) > stable_change:
+            continue
+        if max(window) - min(window) > stable_change * (stability_run - 1):
+            continue
+        stable_index = start + stability_run // 2
+        return round(positions[stable_index])
+    return None
 
 
 def estimate_face_from_skinmap(
@@ -224,22 +324,15 @@ def compute_neck_circumference(
         return None
 
     x_left, neck_y, x_right, _ = neck_pts
+    mask_left_x = x_left
+    mask_right_x = x_right
 
     # Sanity check: need at least a few pixels of skin width
     if x_right <= x_left:
         return None
 
-    # Inset edges by 5% to avoid unreliable depth values at neck sides
     neck_width = x_right - x_left
-    inset = round(neck_width * 0.05)
-    x_left += inset
-    x_right -= inset
-
-    # Step 2: Generate n_samples evenly-spaced x-coordinates from x_left to x_right.
-    # These are the points we will sample along the neck surface.
-    step = (x_right - x_left) / max(n_samples - 1, 1)
-    sample_xs = [round(x_left + i * step) for i in range(n_samples)]
-
+    amplitude = None
     if neck_midpoint_y is not None:
         # Arc from narrowest row (edges) down to neck midpoint (center).
         # The narrowest row is above the midpoint; the arc sags to the
@@ -250,24 +343,65 @@ def compute_neck_circumference(
         edge_offset = round(full_gap / 3)
         neck_y = neck_y + edge_offset
         amplitude = full_gap - edge_offset
-    elif arc_sag is None:
-        amplitude = _find_best_sag(
-            depthmap, sample_xs, neck_y, x_left, x_right,
-            photo_width, photo_height,
-        ) // 2
-    else:
-        # Manual arc_sag is in depth-map pixels; scale to photo resolution.
-        amplitude = arc_sag * photo_height / depthmap.size[1]
+
+    # Median-filter once, then walk inward from both segmentation edges until
+    # the depth profile settles. This replaces the fixed 5% inset, which can
+    # stop either inside a broad silhouette wall or unnecessarily far inward.
+    filtered_depthmap = median_filter_depthmap(depthmap, size=3)
+    max_edge_search = max(6, round(neck_width * 0.20))
+    stable_left = _find_stable_depth_x_from_edge(
+        filtered_depthmap,
+        x_left,
+        neck_y,
+        1,
+        photo_width,
+        photo_height,
+        max_edge_search,
+        4,
+    )
+    stable_right = _find_stable_depth_x_from_edge(
+        filtered_depthmap,
+        x_right,
+        neck_y,
+        -1,
+        photo_width,
+        photo_height,
+        max_edge_search,
+        4,
+    )
+    fallback_inset = round(neck_width * 0.05)
+    x_left = stable_left if stable_left is not None else x_left + fallback_inset
+    x_right = stable_right if stable_right is not None else x_right - fallback_inset
+    if x_right <= x_left:
+        return None
+
+    # Step 2: Generate n_samples evenly-spaced x-coordinates from x_left to x_right.
+    step = (x_right - x_left) / max(n_samples - 1, 1)
+    sample_xs = [round(x_left + i * step) for i in range(n_samples)]
+
+    if amplitude is None:
+        if arc_sag is None:
+            amplitude = _find_best_sag(
+                depthmap,
+                sample_xs,
+                neck_y,
+                x_left,
+                x_right,
+                photo_width,
+                photo_height,
+            ) // 2
+        else:
+            # Manual arc_sag is in depth-map pixels; scale to photo resolution.
+            amplitude = arc_sag * photo_height / depthmap.size[1]
 
     # Step 3: For each sample point, compute Y via half-sine arc,
     # read depth and convert to 3D coordinates.
     #
-    # Depth is read from a same-size median-filtered copy of the depth map,
+    # Depth is read from the same-size median-filtered copy of the depth map,
     # bilinearly sampled at the (fractional) native-resolution coordinate.
     # This smooths TrueDepth sensor noise before it can accumulate across
     # the many points walked along the arc -- the same fix applied to
     # fidmaa-gui's surface_vector_filtered() for straight-line measurements.
-    filtered_depthmap = median_filter_depthmap(depthmap, size=3)
     arc_points_3d = []
     arc_points_photo = []
 
@@ -328,4 +462,6 @@ def compute_neck_circumference(
         front_arc_length_mm=front_arc_length_mm,
         circumference_mm=circumference_mm,
         circumference_multiplier=circumference_multiplier,
+        mask_left_x=mask_left_x,
+        mask_right_x=mask_right_x,
     )

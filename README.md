@@ -19,6 +19,7 @@ iPhone Portrait Mode photos (TrueDepth front camera) carry more than a picture: 
 - **Mouth opening measurement** — MediaPipe FaceMesh-based fallback for patients without visible upper teeth
 - **Neck & chin detection** — three independent strategies depending on what's available: MediaPipe Pose (shoulder/nose interpolation), MediaPipe Selfie Segmentation (silhouette width profile), or a dual-mask approach combining the skin matte, depth map, and hair mask
 - **3D neck circumference** — dense arc integration over the depth map to estimate physical neck circumference, not just a 2D collar-line width
+- **Pose-invariant local landmarks** — robust local-plane removal finds anatomical peaks and valleys without letting mild patient rotation choose the camera-nearest side of a patch
 - **Thyromental distance** — physical chin-to-neck-midpoint measurement, a standard airway/intubation-difficulty screening metric
 - **CLI diagnostic tool** (`analyse-portrait`) — inspect a HEIC file's raw container, EXIF, depth metadata, and segmentation mattes from the command line
 
@@ -154,9 +155,15 @@ Both extend `Rectangle` (attributes: `x`, `y`, `width`, `height`, `center_x`, `c
 
 ### Neck circumference (`neck` module — 3D arc integration)
 
-- `compute_neck_circumference(skinmap, depthmap, photo_width, photo_height, float_min, float_max, face_location=None, n_samples=25, skin_threshold=1, circumference_multiplier=2.7, arc_sag=None, face=None, eyes=None, image_width=None, scan_start_y=None, scan_end_y=None, neck_midpoint_y=None) -> NeckMeasurement | None` -- computes neck circumference by densely sampling the front arc of the neck (using the skin matte and depth map together) and extrapolating to a full circumference.
+- `compute_neck_circumference(skinmap, depthmap, photo_width, photo_height, float_min, float_max, face_location=None, n_samples=25, skin_threshold=1, circumference_multiplier=2.7, arc_sag=None, face=None, eyes=None, image_width=None, scan_start_y=None, scan_end_y=None, neck_midpoint_y=None) -> NeckMeasurement | None` -- computes neck circumference by densely sampling the front arc of the neck (using the skin matte and depth map together) and extrapolating to a full circumference. It walks inward from each matte edge until the depth profile stabilizes, avoiding the TrueDepth silhouette wall.
+- `find_stable_depth_x_from_edge(depthmap, edge_x, y, direction, photo_width, photo_height, max_distance, stability_run=4) -> int | None` -- walks from a left (`direction=1`) or right (`direction=-1`) skin edge in native-depth-pixel steps and returns the centre of the first locally stable depth run.
 - `estimate_face_from_skinmap(skinmap, threshold=1) -> tuple[int, int, int, int] | None` -- estimates a synthetic face bounding box from the skin segmentation map alone, for when no OpenCV face detection is available.
-- `NeckMeasurement` -- dataclass with `neck_y`, `left_x`, `right_x` (photo-space), `arc_points_3d` (physical mm coordinates), `arc_points_photo` (pixel coordinates, for overlay painting).
+- `NeckMeasurement` -- dataclass with stable `left_x`, `right_x` sampling coordinates, original `mask_left_x`, `mask_right_x` silhouette coordinates, `neck_y`, `arc_points_3d` (physical mm coordinates), and `arc_points_photo` (pixel coordinates, for overlay painting).
+
+### Pose-invariant local surface landmarks (`local_surface` module)
+
+- `score_local_surface_feature(x, y, z, valid, feature, radial_fraction=None, smoothing_size=5, center_bias=0.15) -> LocalSurfaceScores` -- robustly fits and removes the dominant local 3D plane, median-smooths the residual, then ranks a `SurfaceFeature.PEAK` or `SurfaceFeature.VALLEY`. Lower scores are always better. An optional normalized radial distance weakly favours the user's clicked area without overriding a strong off-centre feature.
+- `LocalSurfaceScores` -- contains the ranking `score`, detrended `residual`, fitted `baseline`, and final `valid` mask as NumPy arrays.
 
 ### Thyromental distance (`tmd` module)
 

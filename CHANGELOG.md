@@ -4,6 +4,21 @@ All notable changes to portrait-analyser are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- `local_surface` module with robust local-plane detrending and pose-invariant
+  peak/valley scoring for click-centred anatomical landmark patches.
+- `find_stable_depth_x_from_edge()` for walking inward from a skin-matte edge
+  until the depth profile reaches its first stable run.
+
+### Changed
+
+- `compute_neck_circumference()` replaces its fixed 5% silhouette inset with
+  adaptive left/right depth stabilization. `NeckMeasurement` now also exposes
+  the original `mask_left_x` and `mask_right_x` coordinates for diagnostics.
+
 ## [0.5.0] - 2026-08-11
 
 ### Added

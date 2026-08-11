@@ -33,11 +33,17 @@ from .incisor import (
     vector_length_3d,
 )
 from .ios import IOSPortrait, load_image
+from .local_surface import (
+    LocalSurfaceScores,
+    SurfaceFeature,
+    score_local_surface_feature,
+)
 from .mouth import MouthMeasurement, compute_mouth_measurement_from_facemesh
 from .neck import (
     NeckMeasurement,
     compute_neck_circumference,
     estimate_face_from_skinmap,
+    find_stable_depth_x_from_edge,
 )
 from .pose import (
     FaceMeshDebug,
@@ -60,12 +66,14 @@ __all__ = [
     "IOSPortrait",
     "IncisorMeasurement",
     "MouthMeasurement",
+    "LocalSurfaceScores",
     "MultipleFacesDetected",
     "NeckMeasurement",
     "MediaPipeDebug",
     "NeckMidpoint",
     "NoDepthMapFound",
     "PortraitPose",
+    "SurfaceFeature",
     "NoFacesDetected",
     "Rectangle",
     "UnknownExtension",
@@ -86,6 +94,7 @@ __all__ = [
     "find_incisor_distance_teeth",
     "find_neck_measurement_point",
     "find_neck_narrowest_row",
+    "find_stable_depth_x_from_edge",
     "get_face_parameters",
     "load_image",
     "measure_filtered_surface_length",
@@ -93,5 +102,6 @@ __all__ = [
     "pixel_to_mm",
     "sample_filtered_depth",
     "sample_points_along_line",
+    "score_local_surface_feature",
     "vector_length_3d",
 ]
