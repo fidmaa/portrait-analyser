@@ -24,6 +24,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   noise, subtracts an optional semantic hair matte, re-reads the skin boundary
   at the actual shifted arc Y, and prevents stable-depth samples from leaving
   the cleaned skin mask. Maximum inward search is reduced to 12% of neck width.
+- Added FaceMesh-scaled anatomical neck-search bounds and changed bounded
+  skin-width selection from a global minimum to the first median-smoothed,
+  prominent local basin, preventing collar/shoulder dropouts from winning.
 
 ## [0.5.0] - 2026-08-11
 

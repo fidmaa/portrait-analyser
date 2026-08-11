@@ -191,18 +191,18 @@ def detect_eyes(image):
                 eye_y = kp.y * img_h
                 eye_w = face_w * 0.15
                 eye_h = face_h * 0.08
-                eyes.append(Rectangle(
-                    int(eye_x - eye_w / 2),
-                    int(eye_y - eye_h / 2),
-                    int(eye_w),
-                    int(eye_h),
-                ))
+                eyes.append(
+                    Rectangle(
+                        int(eye_x - eye_w / 2),
+                        int(eye_y - eye_h / 2),
+                        int(eye_w),
+                        int(eye_h),
+                    )
+                )
     return eyes
 
 
-def get_face_parameters(
-    input_image: Image.Image, raise_opencv_exceptions=False
-):
+def get_face_parameters(input_image: Image.Image, raise_opencv_exceptions=False):
     """Get face position and size or return an exception in
     case there's none."""
     import mediapipe as mp
@@ -254,13 +254,15 @@ def get_face_parameters(
             eye_y_rel = eye_y_abs - y
             eye_w = w * 0.15
             eye_h = h * 0.08
-            eyes.append(Eye(
-                None,  # face reference set below
-                int(eye_x_rel - eye_w / 2),
-                int(eye_y_rel - eye_h / 2),
-                int(eye_w),
-                int(eye_h),
-            ))
+            eyes.append(
+                Eye(
+                    None,  # face reference set below
+                    int(eye_x_rel - eye_w / 2),
+                    int(eye_y_rel - eye_h / 2),
+                    int(eye_w),
+                    int(eye_h),
+                )
+            )
 
     face = Face(input_image, x, y, w, h, eyes=eyes)
     for eye in face.eyes:
@@ -468,13 +470,16 @@ def estimate_neck_search_zone(face=None, *, eyes=None, image_width=None):
 
 
 def find_narrowest_skin_row(
-    skinmap, scan_start_y, scan_end_y, threshold=1,
+    skinmap,
+    scan_start_y,
+    scan_end_y,
+    threshold=1,
 ):
-    """Find the narrowest skin row between scan_start_y and scan_end_y.
+    """Find the first stable neck-width basin in an anatomical search band.
 
-    Scans every row in the given range and finds the one with the minimum
-    horizontal skin extent (leftmost to rightmost skin pixel). No center-strip
-    logic, no collar detection — just the minimum-width row that still has skin.
+    Widths are median-smoothed vertically before looking for the first
+    prominent local minimum. This prefers the neck basin immediately below the
+    face over a later, globally narrower collar/shoulder matte artefact.
 
     Parameters
     ----------
@@ -501,12 +506,12 @@ def find_narrowest_skin_row(
     if scan_start_y >= scan_end_y:
         return None
 
-    best_width = None
-    best_left = 0
-    best_right = 0
-    best_y = 0
+    ys = numpy.arange(scan_start_y, scan_end_y, dtype=numpy.int32)
+    widths = numpy.full(len(ys), numpy.nan, dtype=numpy.float64)
+    lefts = numpy.zeros(len(ys), dtype=numpy.int32)
+    rights = numpy.zeros(len(ys), dtype=numpy.int32)
 
-    for y in range(scan_start_y, scan_end_y):
+    for index, y in enumerate(ys):
         row = arr[y, :]
         skin_cols = numpy.where(row >= threshold)[0]
         if len(skin_cols) == 0:
@@ -518,23 +523,76 @@ def find_narrowest_skin_row(
 
         if width <= 0:
             continue
+        widths[index] = width
+        lefts[index] = left
+        rights[index] = right
 
-        if best_width is None or width < best_width:
-            best_width = width
-            best_left = left
-            best_right = right
-            best_y = y
-
-    if best_width is None:
+    valid = numpy.isfinite(widths)
+    if not numpy.any(valid):
         return None
 
-    return (best_left, best_y, best_right, best_y)
+    span = len(ys)
+    smooth_radius = max(2, min(15, round(span * 0.02)))
+    smooth = numpy.full(span, numpy.nan, dtype=numpy.float64)
+    for index in numpy.flatnonzero(valid):
+        start = max(0, index - smooth_radius)
+        stop = min(span, index + smooth_radius + 1)
+        local = widths[start:stop]
+        if numpy.count_nonzero(numpy.isfinite(local)) >= smooth_radius + 1:
+            smooth[index] = float(numpy.nanmedian(local))
+
+    smooth_valid = numpy.isfinite(smooth)
+    if not numpy.any(smooth_valid):
+        smooth = widths.copy()
+        smooth_valid = valid.copy()
+
+    comparison_radius = max(3, min(25, round(span * 0.05)))
+    typical_width = float(numpy.nanmedian(smooth[smooth_valid]))
+    minimum_prominence = max(2.0, typical_width * 0.015)
+    local_minima = []
+    for index in range(comparison_radius, span - comparison_radius):
+        if not smooth_valid[index]:
+            continue
+        before = smooth[index - comparison_radius : index]
+        after = smooth[index + 1 : index + comparison_radius + 1]
+        if not numpy.any(numpy.isfinite(before)) or not numpy.any(
+            numpy.isfinite(after)
+        ):
+            continue
+        left_level = float(numpy.nanmedian(before))
+        right_level = float(numpy.nanmedian(after))
+        if (
+            smooth[index] <= numpy.nanmin(before)
+            and smooth[index] <= numpy.nanmin(after)
+            and min(left_level, right_level) - smooth[index] >= minimum_prominence
+        ):
+            local_minima.append(index)
+
+    if local_minima:
+        selected = local_minima[0]
+    else:
+        # Monotonic/noisy profiles have no clear basin. Retain width as the
+        # dominant signal but weakly penalise rows near the bottom of the band.
+        normalized_width = smooth / max(typical_width, 1.0)
+        depth_penalty = numpy.linspace(0.0, 0.12, span)
+        score = normalized_width + depth_penalty
+        score[~smooth_valid] = numpy.inf
+        selected = int(numpy.argmin(score))
+
+    best_y = int(ys[selected])
+    return (int(lefts[selected]), best_y, int(rights[selected]), best_y)
 
 
 def find_neck_measurement_point(
-    skinmap, face_location=None, threshold=1, face=None, smooth_sigma=3.0,
-    eyes=None, image_width=None,
-    scan_start_y=None, scan_end_y=None,
+    skinmap,
+    face_location=None,
+    threshold=1,
+    face=None,
+    smooth_sigma=3.0,
+    eyes=None,
+    image_width=None,
+    scan_start_y=None,
+    scan_end_y=None,
 ):
     """Find the neck measurement row below the face.
 
@@ -556,7 +614,10 @@ def find_neck_measurement_point(
     # When MediaPipe bounds are provided, try narrowest-row search first
     if scan_start_y is not None and scan_end_y is not None:
         result = find_narrowest_skin_row(
-            skinmap, scan_start_y, scan_end_y, threshold=threshold,
+            skinmap,
+            scan_start_y,
+            scan_end_y,
+            threshold=threshold,
         )
         if result is not None:
             return result

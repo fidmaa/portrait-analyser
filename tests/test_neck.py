@@ -12,12 +12,14 @@ from portrait_analyser.face import (
     estimate_neck_search_zone,
     find_neck_measurement_point,
     find_neck_narrowest_row,
+    find_narrowest_skin_row,
 )
 from portrait_analyser.neck import (
     NeckMeasurement,
     compute_neck_circumference,
     estimate_face_from_skinmap,
     find_stable_depth_x_from_edge,
+    neck_search_bounds_from_face_landmarks,
 )
 
 
@@ -193,6 +195,50 @@ class TestStableDepthEdge:
                 photo_height=20,
                 max_distance=10,
             )
+
+
+class TestAnatomicalNeckSearch:
+    def test_face_mesh_bottom_caps_search_above_shoulders(self):
+        landmarks = (
+            (100.0, 100.0),
+            (80.0, 220.0),
+            (120.0, 300.0),
+        )
+
+        start, end = neck_search_bounds_from_face_landmarks(
+            chin=(100.0, 290.0),
+            nose=(100.0, 180.0),
+            image_height=1000,
+            face_mesh_landmarks=landmarks,
+            pose_neck_y=800.0,
+        )
+
+        assert start > 300
+        assert end <= 420
+        assert end < 800
+
+    def test_first_neck_basin_beats_later_narrow_shoulder_artifact(self):
+        width, height = 220, 190
+        skinmap = Image.new("L", (width, height), 0)
+        center = width // 2
+        for y in range(20, 170):
+            if y <= 70:
+                row_width = round(140 - (y - 20) * 1.6)
+            elif y <= 110:
+                row_width = round(60 + (y - 70) * 1.0)
+            elif 136 <= y <= 146:
+                row_width = 20  # collar/shoulder matte dropout
+            else:
+                row_width = 100
+            left = center - row_width // 2
+            right = center + row_width // 2
+            for x in range(left, right + 1):
+                skinmap.putpixel((x, y), 255)
+
+        result = find_narrowest_skin_row(skinmap, 20, 170, threshold=30)
+
+        assert result is not None
+        assert 65 <= result[1] <= 80
 
 
 class TestComputeNeckCircumference:

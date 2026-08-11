@@ -65,6 +65,47 @@ class NeckMeasurement:
     front_chord_length_mm: float | None = None
 
 
+def neck_search_bounds_from_face_landmarks(
+    *,
+    chin: tuple[float, float],
+    nose: tuple[float, float],
+    image_height: int,
+    face_mesh_landmarks: tuple[tuple[float, float], ...] | None = None,
+    pose_neck_y: float | None = None,
+) -> tuple[int, int]:
+    """Bound neck search to the anatomical band immediately below the face.
+
+    FaceMesh supplies both the lowest facial landmark and the visible face
+    height. When it is unavailable, nose-to-chin distance provides a scale
+    fallback. The Pose-derived neck estimate may shorten the band, but can
+    never extend it down toward the shoulders.
+    """
+    if image_height < 2:
+        raise ValueError("image_height must be at least 2")
+
+    if face_mesh_landmarks:
+        landmark_ys = [point[1] for point in face_mesh_landmarks]
+        face_top = min(landmark_ys)
+        face_bottom = max(chin[1], max(landmark_ys))
+        face_height = max(20.0, face_bottom - face_top)
+    else:
+        face_bottom = chin[1]
+        nose_to_chin = max(10.0, chin[1] - nose[1])
+        face_height = max(20.0, nose_to_chin * 2.0)
+
+    start = round(face_bottom + max(2.0, face_height * 0.015))
+    anatomical_end = round(face_bottom + face_height * 0.60)
+    end = anatomical_end
+    if pose_neck_y is not None and pose_neck_y > start:
+        end = min(end, round(pose_neck_y))
+
+    start = min(max(0, start), image_height - 2)
+    minimum_band = max(12, round(face_height * 0.18))
+    end = max(end, start + minimum_band)
+    end = min(max(start + 1, end), image_height)
+    return start, end
+
+
 def _prepare_neck_skinmap(
     skinmap: Image.Image,
     skin_threshold: int,

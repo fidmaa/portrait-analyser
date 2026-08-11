@@ -44,6 +44,7 @@ from .neck import (
     compute_neck_circumference,
     estimate_face_from_skinmap,
     find_stable_depth_x_from_edge,
+    neck_search_bounds_from_face_landmarks,
 )
 from .pose import (
     FaceMeshDebug,
@@ -95,6 +96,7 @@ __all__ = [
     "find_neck_measurement_point",
     "find_neck_narrowest_row",
     "find_stable_depth_x_from_edge",
+    "neck_search_bounds_from_face_landmarks",
     "get_face_parameters",
     "load_image",
     "measure_filtered_surface_length",
