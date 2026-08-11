@@ -54,7 +54,7 @@ class NeckMeasurement:
     circumference_mm: float
 
     # The multiplier used (kept explicit so it can be tuned)
-    circumference_multiplier: float = 2.7
+    circumference_multiplier: float = 3.0
 
     # Raw silhouette coordinates before depth-stability correction.
     mask_left_x: int | None = None
@@ -413,7 +413,7 @@ def compute_neck_circumference(
     face_location=None,  # tuple (x, y, w, h) or None for auto-estimate from skinmap
     n_samples=25,  # number of points to sample across the neck
     skin_threshold=30,  # reject weak semantic-matte fringe/noise
-    circumference_multiplier=2.7,
+    circumference_multiplier=3.0,
     arc_sag=None,  # None=auto-detect; int=fixed sag in depth-map px
     face=None,  # Face object — enables eye-anchored neck search
     eyes=None,  # list of Rectangle — standalone eye detections (no face)
@@ -632,7 +632,7 @@ def compute_neck_circumference(
         )
 
     # Step 5: Estimate full circumference via empirical multiplier.
-    # front_arc_mm * 2.7 ≈ circumference_mm (i.e. front_arc_mm * 0.27 = circumference_cm)
+    # front_arc_mm * 3.0 ≈ circumference_mm (i.e. front_arc_mm * 0.3 = circumference_cm)
     circumference_mm = front_arc_length_mm * circumference_multiplier
     front_chord_length_mm = vector_length_3d(
         *arc_points_3d[0],

@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-11
+
+### Changed
+
+- Increased the default neck-circumference multiplier for the measured 3D
+  front arc from `2.7` to `3.0`.
+
 ## [0.6.0] - 2026-08-11
 
 ### Added
