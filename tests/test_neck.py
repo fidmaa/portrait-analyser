@@ -83,7 +83,11 @@ def _make_depth_image(width, height, fill_value=128):
 
 
 def _make_curved_depth_image(
-    width, height, center_value=200, edge_value=150, center_x=None,
+    width,
+    height,
+    center_value=200,
+    edge_value=150,
+    center_x=None,
 ):
     """Create a depth map with front-surface curvature.
 
@@ -207,7 +211,8 @@ class TestComputeNeckCircumference:
         face_location = (100, 50, 200, 200)  # (x, y, w, h)
 
         skinmap = _make_tapered_skin_image(
-            width, height,
+            width,
+            height,
             face_location=face_location,
             narrowest_offset=30,
             narrowest_width=80,
@@ -302,7 +307,10 @@ class TestComputeNeckCircumference:
 
         flat_depth = _make_depth_image(width, height, fill_value=180)
         curved_depth = _make_curved_depth_image(
-            width, height, center_value=200, edge_value=140,
+            width,
+            height,
+            center_value=200,
+            edge_value=140,
         )
 
         result_flat = compute_neck_circumference(
@@ -596,6 +604,104 @@ class TestComputeNeckCircumference:
         assert probe.mask_left_x < probe.left_x
         assert probe.mask_right_x > probe.right_x
 
+    def test_skin_edges_are_recomputed_at_shifted_arc_y(self):
+        """Displayed matte points must belong to the row where the arc starts."""
+        width, height, face_location, skinmap = self._face_and_skin()
+        depthmap = _make_depth_image(width, height, fill_value=180)
+
+        result = compute_neck_circumference(
+            skinmap=skinmap,
+            depthmap=depthmap,
+            photo_width=width,
+            photo_height=height,
+            float_min=0.5,
+            float_max=2.0,
+            face_location=face_location,
+            scan_start_y=250,
+            scan_end_y=300,
+            neck_midpoint_y=330,
+            n_samples=20,
+        )
+
+        assert result is not None
+        assert skinmap.getpixel((result.mask_left_x, result.neck_y)) >= 30
+        assert skinmap.getpixel((result.mask_right_x, result.neck_y)) >= 30
+        assert skinmap.getpixel((result.mask_left_x - 3, result.neck_y)) < 30
+        assert skinmap.getpixel((result.mask_right_x + 3, result.neck_y)) < 30
+
+    def test_weak_skin_matte_fringe_does_not_expand_neck(self):
+        width, height, face_location, skinmap = self._face_and_skin()
+        depthmap = _make_depth_image(width, height, fill_value=180)
+        for y in range(250, 330):
+            for x in range(20, 60):
+                skinmap.putpixel((x, y), 1)
+
+        result = compute_neck_circumference(
+            skinmap=skinmap,
+            depthmap=depthmap,
+            photo_width=width,
+            photo_height=height,
+            float_min=0.5,
+            float_max=2.0,
+            face_location=face_location,
+            scan_start_y=250,
+            scan_end_y=300,
+            neck_midpoint_y=320,
+        )
+
+        assert result is not None
+        assert result.mask_left_x > 100
+
+    def test_hair_matte_is_removed_from_allowed_neck_edge(self):
+        width, height, face_location, skinmap = self._face_and_skin()
+        depthmap = _make_depth_image(width, height, fill_value=180)
+        hairmap = Image.new("L", (width, height), 0)
+        for y in range(250, 340):
+            for x in range(100, 185):
+                hairmap.putpixel((x, y), 255)
+
+        result = compute_neck_circumference(
+            skinmap=skinmap,
+            hairmap=hairmap,
+            depthmap=depthmap,
+            photo_width=width,
+            photo_height=height,
+            float_min=0.5,
+            float_max=2.0,
+            face_location=face_location,
+            scan_start_y=250,
+            scan_end_y=300,
+            neck_midpoint_y=320,
+        )
+
+        assert result is not None
+        assert result.mask_left_x >= 186
+        assert result.left_x > result.mask_left_x
+
+    def test_front_arc_is_surface_polyline_and_chord_is_euclidean(self):
+        width, height, face_location, skinmap = self._face_and_skin()
+        depthmap = _make_curved_depth_image(
+            width,
+            height,
+            center_value=200,
+            edge_value=140,
+        )
+
+        result = compute_neck_circumference(
+            skinmap=skinmap,
+            depthmap=depthmap,
+            photo_width=width,
+            photo_height=height,
+            float_min=0.5,
+            float_max=2.0,
+            face_location=face_location,
+            n_samples=30,
+        )
+
+        assert result is not None
+        assert result.front_chord_length_mm is not None
+        assert result.front_arc_length_mm > result.front_chord_length_mm
+
     def test_no_face_location_uses_fallback(self):
         """Call with face_location=None — should auto-estimate from skin map."""
         width, height, _face_location, skinmap = self._face_and_skin()
@@ -772,8 +878,8 @@ class TestEstimateNeckSearchZone:
     def test_returns_zone_with_two_eyes(self):
         face = _MockFace(x=100, y=50, width=200, height=200)
         face.eyes = [
-            _MockEye(center_x=60, center_y=80),   # left eye (face-relative)
-            _MockEye(center_x=140, center_y=82),   # right eye (face-relative)
+            _MockEye(center_x=60, center_y=80),  # left eye (face-relative)
+            _MockEye(center_x=140, center_y=82),  # right eye (face-relative)
         ]
         zone = estimate_neck_search_zone(face)
         assert zone is not None
@@ -808,8 +914,8 @@ class TestEstimateNeckSearchZone:
         """With >2 eyes detected, picks the pair with smallest Y difference."""
         face = _MockFace(x=100, y=50, width=200, height=200)
         face.eyes = [
-            _MockEye(center_x=60, center_y=80),    # true left eye
-            _MockEye(center_x=140, center_y=82),   # true right eye (close Y)
+            _MockEye(center_x=60, center_y=80),  # true left eye
+            _MockEye(center_x=140, center_y=82),  # true right eye (close Y)
             _MockEye(center_x=100, center_y=140),  # spurious (eyebrow etc.)
         ]
         zone = estimate_neck_search_zone(face)
@@ -830,7 +936,8 @@ class TestFindNeckNarrowestRow:
         skinmap = _make_neck_skinmap(narrowest_y=350, narrowest_half_w=40)
         face_loc = (100, 50, 200, 200)  # face bottom at y=250
         result = find_neck_narrowest_row(
-            skinmap, face_location=face_loc,
+            skinmap,
+            face_location=face_loc,
         )
         assert result is not None
         x_left, neck_y, x_right, neck_y2 = result
@@ -846,7 +953,8 @@ class TestFindNeckNarrowestRow:
         skinmap = _make_neck_skinmap(narrowest_y=350, narrowest_half_w=40)
         search_zone = (200, 300, 300)  # center_x=200, start_y=300, width=300
         result = find_neck_narrowest_row(
-            skinmap, search_zone=search_zone,
+            skinmap,
+            search_zone=search_zone,
         )
         assert result is not None
         _, neck_y, _, _ = result
@@ -858,11 +966,14 @@ class TestFindNeckNarrowestRow:
         # Neck centered at x=200 with half-width up to 150 at bottom
         # Face box at x=150..250 (width=100) — neck edges extend beyond
         skinmap = _make_neck_skinmap(
-            narrowest_y=350, narrowest_half_w=120, top_half_w=120,
+            narrowest_y=350,
+            narrowest_half_w=120,
+            top_half_w=120,
         )
         face_loc = (150, 50, 100, 200)  # narrow face box
         result = find_neck_narrowest_row(
-            skinmap, face_location=face_loc,
+            skinmap,
+            face_location=face_loc,
         )
         assert result is not None
         x_left, _, x_right, _ = result
@@ -878,7 +989,8 @@ class TestFindNeckNarrowestRow:
         skinmap_gap = Image.fromarray(arr)
 
         result = find_neck_narrowest_row(
-            skinmap_gap, face_location=(100, 50, 200, 200),
+            skinmap_gap,
+            face_location=(100, 50, 200, 200),
         )
         assert result is not None
         _, neck_y, _, _ = result
@@ -889,7 +1001,8 @@ class TestFindNeckNarrowestRow:
         """All-black skin map should return None."""
         skinmap = Image.new("L", (400, 600), 0)
         result = find_neck_narrowest_row(
-            skinmap, face_location=(100, 50, 200, 200),
+            skinmap,
+            face_location=(100, 50, 200, 200),
         )
         assert result is None
 
@@ -902,12 +1015,15 @@ class TestFindNeckNarrowestRow:
         """Should find where skin disappears (collar), not the narrowest row."""
         # Skinmap: wide → narrow at y=350 → stays narrow → ends at y=450
         skinmap = _make_neck_skinmap(
-            narrowest_y=350, narrowest_half_w=40,
-            bottom_y=450, bottom_half_w=60,
+            narrowest_y=350,
+            narrowest_half_w=40,
+            bottom_y=450,
+            bottom_half_w=60,
         )
         face_loc = (100, 50, 200, 200)
         result = find_neck_narrowest_row(
-            skinmap, face_location=face_loc,
+            skinmap,
+            face_location=face_loc,
         )
         assert result is not None
         _, neck_y, _, _ = result
@@ -948,7 +1064,9 @@ class TestFindNeckMeasurementPoint:
         ]
         face_loc = (100, 50, 200, 200)
         result = find_neck_measurement_point(
-            skinmap, face_loc, face=face,
+            skinmap,
+            face_loc,
+            face=face,
         )
         assert result is not None
         _, neck_y, _, _ = result
@@ -963,7 +1081,9 @@ class TestFindNeckMeasurementPoint:
         face.eyes = []
         face_loc = (100, 50, 200, 200)
         result = find_neck_measurement_point(
-            skinmap, face_loc, face=face,
+            skinmap,
+            face_loc,
+            face=face,
         )
         assert result is not None
         _, neck_y, _, _ = result

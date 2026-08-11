@@ -12,12 +12,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   peak/valley scoring for click-centred anatomical landmark patches.
 - `find_stable_depth_x_from_edge()` for walking inward from a skin-matte edge
   until the depth profile reaches its first stable run.
+- Direct Euclidean `front_chord_length_mm` diagnostics alongside the existing
+  3D surface-polyline neck arc.
 
 ### Changed
 
 - `compute_neck_circumference()` replaces its fixed 5% silhouette inset with
   adaptive left/right depth stabilization. `NeckMeasurement` now also exposes
   the original `mask_left_x` and `mask_right_x` coordinates for diagnostics.
+- Neck skin selection now rejects weak matte values, median-cleans isolated
+  noise, subtracts an optional semantic hair matte, re-reads the skin boundary
+  at the actual shifted arc Y, and prevents stable-depth samples from leaving
+  the cleaned skin mask. Maximum inward search is reduced to 12% of neck width.
 
 ## [0.5.0] - 2026-08-11
 

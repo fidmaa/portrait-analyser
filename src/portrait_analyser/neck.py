@@ -10,7 +10,7 @@ import math
 from dataclasses import dataclass
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 from .depth_sampling import median_filter_depthmap, sample_filtered_depth
 from .face import find_neck_measurement_point, sample_depth_at_point
@@ -60,6 +60,78 @@ class NeckMeasurement:
     mask_left_x: int | None = None
     mask_right_x: int | None = None
 
+    # Direct Euclidean chord between the first and last sampled 3D arc points.
+    # ``front_arc_length_mm`` is the surface polyline and is always >= this value.
+    front_chord_length_mm: float | None = None
+
+
+def _prepare_neck_skinmap(
+    skinmap: Image.Image,
+    skin_threshold: int,
+    hairmap: Image.Image | None = None,
+    hair_threshold: int = 30,
+) -> Image.Image:
+    """Return a denoised binary neck mask with semantic hair removed."""
+    skin = np.asarray(skinmap.convert("L"), dtype=np.uint8) >= skin_threshold
+    binary = Image.fromarray((skin * 255).astype(np.uint8), mode="L")
+    binary = binary.filter(ImageFilter.MedianFilter(5))
+
+    if hairmap is not None:
+        hair = hairmap.convert("L")
+        if hair.size != binary.size:
+            hair = hair.resize(binary.size, Image.Resampling.BILINEAR)
+        hair_binary = np.asarray(hair, dtype=np.uint8) >= hair_threshold
+        # Expand hair by one pixel so an anti-aliased fringe cannot become a
+        # seemingly stable neck-depth patch.
+        hair_binary = Image.fromarray((hair_binary * 255).astype(np.uint8), mode="L")
+        hair_binary = hair_binary.filter(ImageFilter.MaxFilter(3))
+        clean = np.asarray(binary, dtype=np.uint8) > 0
+        clean &= np.asarray(hair_binary, dtype=np.uint8) == 0
+        binary = Image.fromarray((clean * 255).astype(np.uint8), mode="L")
+
+    return binary
+
+
+def _skin_run_at_y(
+    skinmap: Image.Image,
+    y: int,
+    center_x: float,
+    vertical_radius: int = 2,
+) -> tuple[int, int] | None:
+    """Find the contiguous skin run nearest the neck centre at a target row."""
+    mask = np.asarray(skinmap.convert("L"), dtype=np.uint8) > 0
+    top = max(0, round(y) - vertical_radius)
+    bottom = min(mask.shape[0], round(y) + vertical_radius + 1)
+    if top >= bottom:
+        return None
+    votes = np.count_nonzero(mask[top:bottom], axis=0)
+    row = votes >= (bottom - top) // 2 + 1
+
+    padded = np.pad(row.astype(np.int8), (1, 1))
+    changes = np.diff(padded)
+    starts = np.flatnonzero(changes == 1)
+    stops = np.flatnonzero(changes == -1) - 1
+    runs = [
+        (int(left), int(right))
+        for left, right in zip(starts, stops, strict=True)
+        if right - left >= 2
+    ]
+    if not runs:
+        return None
+
+    containing_center = [run for run in runs if run[0] <= center_x <= run[1]]
+    if containing_center:
+        return max(containing_center, key=lambda run: run[1] - run[0])
+    return min(runs, key=lambda run: abs((run[0] + run[1]) / 2 - center_x))
+
+
+def _mask_contains_photo_point(mask, x, y, photo_width, photo_height) -> bool:
+    mask_x = round(x * (mask.width - 1) / max(1, photo_width - 1))
+    mask_y = round(y * (mask.height - 1) / max(1, photo_height - 1))
+    mask_x = min(max(mask_x, 0), mask.width - 1)
+    mask_y = min(max(mask_y, 0), mask.height - 1)
+    return mask.getpixel((mask_x, mask_y)) > 0
+
 
 def find_stable_depth_x_from_edge(
     depthmap,
@@ -70,6 +142,7 @@ def find_stable_depth_x_from_edge(
     photo_height,
     max_distance,
     stability_run=4,
+    valid_mask=None,
 ):
     """Find the first stable depth patch while walking in from a skin edge.
 
@@ -88,6 +161,7 @@ def find_stable_depth_x_from_edge(
         photo_height,
         max_distance,
         stability_run,
+        valid_mask,
     )
 
 
@@ -100,6 +174,7 @@ def _find_stable_depth_x_from_edge(
     photo_height,
     max_distance,
     stability_run,
+    valid_mask=None,
 ):
     if direction not in (-1, 1):
         raise ValueError("direction must be -1 or 1")
@@ -109,22 +184,32 @@ def _find_stable_depth_x_from_edge(
         return None
 
     native_step = max(1.0, (photo_width - 1) / max(1, filtered_depthmap.width - 1))
-    sample_distances = list(np.arange(0.0, max_distance + native_step * 0.25, native_step))
+    sample_distances = list(
+        np.arange(0.0, max_distance + native_step * 0.25, native_step)
+    )
     if sample_distances[-1] < max_distance:
         sample_distances.append(float(max_distance))
-    positions = [
-        edge_x + direction * distance for distance in sample_distances
-    ]
-    values = [
-        sample_filtered_depth(
-            filtered_depthmap,
+    positions = [edge_x + direction * distance for distance in sample_distances]
+    values = []
+    for position in positions:
+        if valid_mask is not None and not _mask_contains_photo_point(
+            valid_mask,
             position,
             y,
             photo_width,
             photo_height,
+        ):
+            values.append(None)
+            continue
+        values.append(
+            sample_filtered_depth(
+                filtered_depthmap,
+                position,
+                y,
+                photo_width,
+                photo_height,
+            )
         )
-        for position in positions
-    ]
 
     differences = [
         abs(right - left)
@@ -157,7 +242,8 @@ def _find_stable_depth_x_from_edge(
 
 
 def estimate_face_from_skinmap(
-    skinmap: Image.Image, threshold: int = 1,
+    skinmap: Image.Image,
+    threshold: int = 1,
 ) -> tuple[int, int, int, int] | None:
     """Estimate a face bounding box from the skin segmentation map.
 
@@ -204,8 +290,14 @@ def estimate_face_from_skinmap(
 
 
 def _depth_amplitude_at_sag(
-    depthmap, sample_xs, neck_y, x_left, x_right,
-    photo_width, photo_height, sag,
+    depthmap,
+    sample_xs,
+    neck_y,
+    x_left,
+    x_right,
+    photo_width,
+    photo_height,
+    sag,
 ):
     """Compute max-min depth amplitude along a half-sine arc at given sag.
 
@@ -231,9 +323,15 @@ def _depth_amplitude_at_sag(
 
 
 def _find_best_sag(
-    depthmap, sample_xs, neck_y, x_left, x_right,
-    photo_width, photo_height,
-    max_sag_photo=300, sag_step=5,
+    depthmap,
+    sample_xs,
+    neck_y,
+    x_left,
+    x_right,
+    photo_width,
+    photo_height,
+    max_sag_photo=300,
+    sag_step=5,
 ) -> int:
     """Find the arc sag (photo pixels) that minimises depth amplitude.
 
@@ -246,8 +344,14 @@ def _find_best_sag(
 
     for sag in range(0, max_sag_photo + 1, sag_step):
         amp = _depth_amplitude_at_sag(
-            depthmap, sample_xs, neck_y, x_left, x_right,
-            photo_width, photo_height, sag,
+            depthmap,
+            sample_xs,
+            neck_y,
+            x_left,
+            x_right,
+            photo_width,
+            photo_height,
+            sag,
         )
         if amp is None:
             continue
@@ -267,7 +371,7 @@ def compute_neck_circumference(
     float_max,  # float — EXIF depth calibration
     face_location=None,  # tuple (x, y, w, h) or None for auto-estimate from skinmap
     n_samples=25,  # number of points to sample across the neck
-    skin_threshold=1,    # any nonzero pixel is skin
+    skin_threshold=30,  # reject weak semantic-matte fringe/noise
     circumference_multiplier=2.7,
     arc_sag=None,  # None=auto-detect; int=fixed sag in depth-map px
     face=None,  # Face object — enables eye-anchored neck search
@@ -276,6 +380,8 @@ def compute_neck_circumference(
     scan_start_y=None,  # int — top of MediaPipe-bounded search range (mouth Y)
     scan_end_y=None,  # int — bottom of search range (neck midpoint Y)
     neck_midpoint_y=None,  # float — MediaPipe neck midpoint Y for arc center
+    hairmap=None,  # optional PIL hair matte, removed from the allowed neck surface
+    hair_threshold=30,
 ) -> NeckMeasurement | None:
     """Compute neck circumference by densely sampling the front arc.
 
@@ -291,14 +397,19 @@ def compute_neck_circumference(
     """
     # Neutralise white borders that some skinmaps have — paint a
     # 30-pixel black frame so border pixels are never mistaken for skin.
-    skinmap = skinmap.copy()
+    skinmap = _prepare_neck_skinmap(
+        skinmap,
+        skin_threshold,
+        hairmap=hairmap,
+        hair_threshold=hair_threshold,
+    )
     draw = ImageDraw.Draw(skinmap)
     border = 30
     w, h = skinmap.size
-    draw.rectangle([0, 0, w - 1, border - 1], fill=0)          # top
-    draw.rectangle([0, h - border, w - 1, h - 1], fill=0)      # bottom
-    draw.rectangle([0, 0, border - 1, h - 1], fill=0)          # left
-    draw.rectangle([w - border, 0, w - 1, h - 1], fill=0)      # right
+    draw.rectangle([0, 0, w - 1, border - 1], fill=0)  # top
+    draw.rectangle([0, h - border, w - 1, h - 1], fill=0)  # bottom
+    draw.rectangle([0, 0, border - 1, h - 1], fill=0)  # left
+    draw.rectangle([w - border, 0, w - 1, h - 1], fill=0)  # right
 
     # Auto-estimate face location from skin map when not provided
     if face_location is None:
@@ -315,23 +426,26 @@ def compute_neck_circumference(
     # and right skin edges at the narrowest horizontal line below the face.
     try:
         neck_pts = find_neck_measurement_point(
-            skinmap, face_location, threshold=skin_threshold, face=face,
-            eyes=eyes, image_width=image_width,
-            scan_start_y=scan_start_y, scan_end_y=scan_end_y,
+            skinmap,
+            face_location,
+            threshold=skin_threshold,
+            face=face,
+            eyes=eyes,
+            image_width=image_width,
+            scan_start_y=scan_start_y,
+            scan_end_y=scan_end_y,
         )
     except (IndexError, ValueError):
         # No valid neck measurement found (e.g. no skin rows below face)
         return None
 
     x_left, neck_y, x_right, _ = neck_pts
-    mask_left_x = x_left
-    mask_right_x = x_right
 
     # Sanity check: need at least a few pixels of skin width
     if x_right <= x_left:
         return None
 
-    neck_width = x_right - x_left
+    initial_center_x = (x_left + x_right) / 2
     amplitude = None
     if neck_midpoint_y is not None:
         # Arc from narrowest row (edges) down to neck midpoint (center).
@@ -344,11 +458,25 @@ def compute_neck_circumference(
         neck_y = neck_y + edge_offset
         amplitude = full_gap - edge_offset
 
+    # The arc edge Y may differ from the row selected by the narrowest-neck
+    # search. Re-read the matte at the actual measurement Y; carrying the old
+    # X coordinates down to a new row can visibly place a "skin" point outside
+    # the matte. Selecting one contiguous central run also rejects islands.
+    target_skin_run = _skin_run_at_y(skinmap, neck_y, initial_center_x)
+    if target_skin_run is None:
+        return None
+    x_left, x_right = target_skin_run
+    mask_left_x = x_left
+    mask_right_x = x_right
+    neck_width = x_right - x_left
+    if neck_width <= 0:
+        return None
+
     # Median-filter once, then walk inward from both segmentation edges until
     # the depth profile settles. This replaces the fixed 5% inset, which can
     # stop either inside a broad silhouette wall or unnecessarily far inward.
     filtered_depthmap = median_filter_depthmap(depthmap, size=3)
-    max_edge_search = max(6, round(neck_width * 0.20))
+    max_edge_search = max(6, round(neck_width * 0.12))
     stable_left = _find_stable_depth_x_from_edge(
         filtered_depthmap,
         x_left,
@@ -358,6 +486,7 @@ def compute_neck_circumference(
         photo_height,
         max_edge_search,
         4,
+        skinmap,
     )
     stable_right = _find_stable_depth_x_from_edge(
         filtered_depthmap,
@@ -368,6 +497,7 @@ def compute_neck_circumference(
         photo_height,
         max_edge_search,
         4,
+        skinmap,
     )
     fallback_inset = round(neck_width * 0.05)
     x_left = stable_left if stable_left is not None else x_left + fallback_inset
@@ -381,15 +511,18 @@ def compute_neck_circumference(
 
     if amplitude is None:
         if arc_sag is None:
-            amplitude = _find_best_sag(
-                depthmap,
-                sample_xs,
-                neck_y,
-                x_left,
-                x_right,
-                photo_width,
-                photo_height,
-            ) // 2
+            amplitude = (
+                _find_best_sag(
+                    depthmap,
+                    sample_xs,
+                    neck_y,
+                    x_left,
+                    x_right,
+                    photo_width,
+                    photo_height,
+                )
+                // 2
+            )
         else:
             # Manual arc_sag is in depth-map pixels; scale to photo resolution.
             amplitude = arc_sag * photo_height / depthmap.size[1]
@@ -411,7 +544,11 @@ def compute_neck_circumference(
         sample_y = neck_y + round(amplitude * math.sin(math.pi * t))
 
         raw_depth = sample_filtered_depth(
-            filtered_depthmap, sx, sample_y, photo_width, photo_height,
+            filtered_depthmap,
+            sx,
+            sample_y,
+            photo_width,
+            photo_height,
         )
         if raw_depth is None:
             # Skip points where depth data is missing or zero (invalid disparity)
@@ -445,13 +582,21 @@ def compute_neck_circumference(
         p0 = arc_points_3d[i - 1]
         p1 = arc_points_3d[i]
         front_arc_length_mm += vector_length_3d(
-            p0[0], p0[1], p0[2],
-            p1[0], p1[1], p1[2],
+            p0[0],
+            p0[1],
+            p0[2],
+            p1[0],
+            p1[1],
+            p1[2],
         )
 
     # Step 5: Estimate full circumference via empirical multiplier.
     # front_arc_mm * 2.7 ≈ circumference_mm (i.e. front_arc_mm * 0.27 = circumference_cm)
     circumference_mm = front_arc_length_mm * circumference_multiplier
+    front_chord_length_mm = vector_length_3d(
+        *arc_points_3d[0],
+        *arc_points_3d[-1],
+    )
 
     return NeckMeasurement(
         neck_y=neck_y,
@@ -464,4 +609,5 @@ def compute_neck_circumference(
         circumference_multiplier=circumference_multiplier,
         mask_left_x=mask_left_x,
         mask_right_x=mask_right_x,
+        front_chord_length_mm=front_chord_length_mm,
     )
