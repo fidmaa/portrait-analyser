@@ -46,6 +46,7 @@ dev = [
 
 [project.scripts]
 analyse-portrait = "portrait_analyser.__main__:main"
+measure-ulbt = "portrait_analyser.ulbt:main"
 
 [project.urls]
 Homepage = "https://github.com/fidmaa/portrait-analyser"

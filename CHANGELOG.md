@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `ulbt` module measuring the upper lip bite test (ULBT) by colour rather than
+  by landmark position. `compute_ulbt_from_facemesh()` classifies the band
+  FaceMesh proposes as upper lip against reference colours sampled from skin,
+  the lower lip and (optionally) the iOS teeth matte, and reports the share of
+  that band which still reads as vermilion.
+- `measure-ulbt` console script: point it at a HEIC and it reports how far the
+  lower incisors have covered the upper lip vermilion. `--json` for batching.
+- `detect_face_mesh()` in `pose`, exposing the 478 Face Mesh landmarks without
+  also running Pose estimation (which needs shoulders in frame).
+
+### Changed
+
+- `pose` diagnostic chatter ("Mouth open ratio") now goes to stderr instead of
+  stdout, so it cannot corrupt a caller's machine-readable output.
+
+### Notes
+
+- ULBT class I/II/III thresholds are **not** established. The measurement is
+  deliberately continuous and returns no class label; it has been checked
+  against a single capture and needs calibrating against a graded series.
+  Neither FaceMesh nor semantic face parsing can be trusted to locate the
+  vermilion in this pose — both place "upper lip" on the philtrum skin once
+  the vermilion is rolled under by the bite, which is why the measurement
+  keys off pixel colour instead of model labels.
+
 ## [0.6.1] - 2026-08-11
 
 ### Changed

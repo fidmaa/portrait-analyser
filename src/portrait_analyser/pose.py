@@ -8,6 +8,7 @@ Requires the optional ``pose`` extra::
 from __future__ import annotations
 
 import os
+import sys
 import urllib.request
 from dataclasses import dataclass
 from enum import Enum
@@ -211,7 +212,13 @@ def _detect_chin_via_face_mesh(
         mouth_open_ratio: float | None = None
         if mouth_width > 5:
             mouth_open_ratio = vertical_opening / mouth_width
-            print(f"  Mouth open ratio: {mouth_open_ratio:.3f} (threshold: {MOUTH_OPEN_THRESHOLD})")
+            # stderr, not stdout: this is diagnostic chatter from a library
+            # function, and it must not corrupt a caller's machine-readable
+            # output (e.g. `measure-ulbt --json`).
+            print(
+                f"  Mouth open ratio: {mouth_open_ratio:.3f} (threshold: {MOUTH_OPEN_THRESHOLD})",
+                file=sys.stderr,
+            )
 
         return FaceMeshAnalysis(
             chin=chin_px,
@@ -225,6 +232,31 @@ def _detect_chin_via_face_mesh(
         )
     except Exception:
         return None
+
+
+def detect_face_mesh(
+    image: Image.Image,
+    min_detection_confidence: float = 0.5,
+) -> FaceMeshDebug | None:
+    """Run Face Mesh on its own and return all 478 landmarks.
+
+    ``detect_neck_midpoint`` also exposes these, but only after running Pose
+    estimation, which needs shoulders in frame. Measurements that key off the
+    face alone should use this instead.
+
+    :param image: PIL Image of the portrait
+    :param min_detection_confidence: MediaPipe face detection threshold
+    :returns: FaceMeshDebug with landmarks in photo-space pixels, or None when
+        no face was found
+    """
+    import mediapipe as mp
+
+    rgb = np.ascontiguousarray(np.asarray(image.convert("RGB")))
+    height, width = rgb.shape[:2]
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+    result = _detect_chin_via_face_mesh(mp_image, width, height, min_detection_confidence)
+    return result.debug if result is not None else None
 
 
 def detect_neck_midpoint(

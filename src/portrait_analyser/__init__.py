@@ -51,8 +51,10 @@ from .pose import (
     MediaPipeDebug,
     NeckMidpoint,
     PortraitPose,
+    detect_face_mesh,
     detect_neck_midpoint,
 )
+from .ulbt import ULBTDebug, ULBTMeasurement, compute_ulbt_from_facemesh
 from .extended_neck import (
     SegmentationDebug,
     detect_neck_midpoint_from_dual_mask,
@@ -67,6 +69,10 @@ __all__ = [
     "IOSPortrait",
     "IncisorMeasurement",
     "MouthMeasurement",
+    "ULBTDebug",
+    "ULBTMeasurement",
+    "compute_ulbt_from_facemesh",
+    "detect_face_mesh",
     "LocalSurfaceScores",
     "MultipleFacesDetected",
     "NeckMeasurement",
