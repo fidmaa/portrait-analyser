@@ -32,7 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `floatValueMax = 1/Z_near` and `floatValueMin = 1/Z_far`, `Z_far =
   min(farthest valid depth, DISPARITY_FAR_CAP_M = 3 m)`; farther/invalid
   pixels encode as 0. Quantisation: one code step is ~1.1-1.3 mm of depth at
-  30 cm and ~3-3.6 mm at 50 cm (round-trip error at most half a step). New
+  30 cm and ~3-3.6 mm at 50 cm (round-trip error at most half a step).
+  `depthmap` mode is `"L"` for these files and `"RGB"` for Camera-app files. New
   `encode_depth_as_disparity_8bit()` does the encoding. Without macOS the
   load fails with `NoDepthMapFound` chained to the reason.
 - New `IOSPortrait` attributes (all `None` when unknown): `depth_m`
@@ -59,6 +60,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `camera=None`. `load_image()` passes the file's camera for its own incisor
   measurements on capture-app files. `pixels_per_mm_at_distance` is now
   exported from the package root.
+
+- Safety for capture-app depth (review fixes):
+  - Depth code 0 means "no depth" in capture-app `depthmap`s (NaN or beyond
+    the 3 m cap) but a real farthest depth in Camera-app ones;
+    `depth_raw_to_distance_cm(0)` returns `Z_far` either way. New
+    `raw_depth_to_distance_cm(v, fmin, fmax, camera=None)` returns None for 0
+    when a camera is given; `compute_incisor_distance_3d` / `compute_tmd_3d`
+    use it; `sample_depth_at_point(..., invalid_value=None)` can exclude a
+    code from its median (load_image and the mouth measurement pass 0 for
+    capture-app files). `IOSPortrait.depth_code_zero_is_invalid` and
+    `IOSPortrait.depth_valid_mask` expose it.
+  - Pinhole conversion has a working range, 10-150 cm
+    (`MIN/MAX_PINHOLE_DISTANCE_CM`); None outside.
+  - `IOSPortrait.depth_plausible` / `check_depth_plausibility()`: skin-matte
+    median depth must be 15-100 cm and nearer than the background, else
+    False (e.g. inverted depth) and load_image skips its 3-D teeth
+    measurements. Never auto-inverted.
+  - Depth is rotated by the aux data's own `Orientation`
+    (`AppleDepthData.aux_orientation` / `.depth_orientation`), EXIF as
+    fallback; a disagreement raises `AppleDepthDecodeError`. Unknown
+    orientation or an aspect mismatch after rotation -> no intrinsics,
+    `depth_plausible = False`, nothing measured.
+  - The camera (pinhole) model is only used for `"absolute"` depth; relative
+    capture-app depth stays on the polynomial with a warning.
+  - The 8-bit encoding's near end is the 0.1st percentile of valid depths
+    (`NEAR_PERCENTILE`); nearer pixels saturate at 255, so one stray pixel
+    no longer coarsens the quantisation.
+  - `read_apple_depth` turns unexpected pyobjc shapes (Attribute/Index/Key/
+    Type/ValueError) into `AppleDepthDecodeError`; a Camera-app load never
+    fails because of it (logged, `depth_accuracy = None`).
+  - `CameraModel` gains optional `width`/`height` (the image its intrinsics
+    refer to, i.e. the full-resolution photo).
+  - pyobjc lower bound raised to 12.2 (the tested version).
 
 ### Changed
 

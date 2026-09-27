@@ -62,11 +62,13 @@ def compute_mouth_measurement_from_facemesh(
     upper_point = landmarks[_UPPER_LIP_OUTER]
     lower_point = landmarks[_LOWER_LIP_OUTER]
 
+    # Capture-app depth (camera given) encodes "no depth" as code 0.
+    invalid_value = 0 if camera is not None else None
     upper_depth_raw = sample_depth_at_point(
-        depthmap, upper_point[0], upper_point[1], photo_w, photo_h
+        depthmap, upper_point[0], upper_point[1], photo_w, photo_h, invalid_value=invalid_value
     )
     lower_depth_raw = sample_depth_at_point(
-        depthmap, lower_point[0], lower_point[1], photo_w, photo_h
+        depthmap, lower_point[0], lower_point[1], photo_w, photo_h, invalid_value=invalid_value
     )
 
     distance_3d_mm = None

@@ -23,6 +23,36 @@ from .camera import camera_axis
 MIN_CALIBRATED_DISTANCE_CM = 15.0
 MAX_CALIBRATED_DISTANCE_CM = 80.0
 
+# Working range of the pinhole (file-intrinsics) conversion. The pinhole
+# model itself has no such limit, but the TrueDepth sensor does: it is
+# reliable at roughly 20-50 cm and a face is never measured closer than
+# 10 cm or farther than 1.5 m. Anything outside is far more likely to be a
+# decoding error (e.g. inverted depth putting the face at ~3 m) or an
+# invalid "no depth" pixel than a real measurement, so it is refused.
+MIN_PINHOLE_DISTANCE_CM = 10.0
+MAX_PINHOLE_DISTANCE_CM = 150.0
+
+
+def _pinhole_distance_ok(distance_cm):
+    return (
+        distance_cm is not None
+        and MIN_PINHOLE_DISTANCE_CM <= distance_cm <= MAX_PINHOLE_DISTANCE_CM
+    )
+
+
+def raw_depth_to_distance_cm(value, float_min, float_max, camera=None):
+    """:func:`depth_raw_to_distance_cm`, honouring the capture-app encoding.
+
+    With a ``camera`` (i.e. a capture-app file, see ``ios.load_image``) code
+    ``0`` means "no depth" and returns ``None``; without one (Camera-app
+    files) code 0 is a valid farthest depth, exactly as before.
+    """
+    if value is None:
+        return None
+    if camera is not None and value == 0:
+        return None
+    return depth_raw_to_distance_cm(value, float_min, float_max)
+
 
 def depth_raw_to_distance_cm(value, float_min, float_max):
     """Convert raw depth pixel value to physical distance in centimeters.
@@ -51,16 +81,17 @@ def pixels_per_mm_at_distance(distance_cm, *, focal_px=None):
 
     With ``focal_px`` (a file's own focal length in photo pixels, see
     :class:`portrait_analyser.camera.CameraModel`): the pinhole model
-    ``focal_px / distance_mm``, with no calibrated-range limit.
+    ``focal_px / distance_mm``, within MIN_PINHOLE_DISTANCE_CM ..
+    MAX_PINHOLE_DISTANCE_CM (10-150 cm).
 
     :param distance_cm: distance from camera in centimeters
     :param focal_px: optional focal length in pixels (keyword-only)
     :returns: pixels per millimeter at the given distance, or None when the
-        distance falls outside the calibrated range (polynomial) or is not
-        positive (pinhole)
+        distance falls outside the calibrated range (polynomial) or the
+        pinhole working range
     """
     if focal_px is not None:
-        if distance_cm is None or distance_cm <= 0:
+        if not _pinhole_distance_ok(distance_cm):
             return None
         return focal_px / (distance_cm * 10.0)
 
@@ -93,7 +124,9 @@ def pixel_to_mm(pixel_coord, distance_cm, image_dimension, *, focal_px=None, pri
     polynomial's expected resolution (~2300x3000).
 
     Camera mode (``focal_px`` given): ``(pixel - principal) * distance_mm /
-    focal_px``, with ``principal_px`` defaulting to ``image_dimension / 2``.
+    focal_px``, with ``principal_px`` defaulting to ``image_dimension / 2``,
+    for distances within MIN_PINHOLE_DISTANCE_CM .. MAX_PINHOLE_DISTANCE_CM
+    (10-150 cm; None outside).
     Both must be in the same pixel space as ``pixel_coord`` (the upright
     photo returned by ``load_image``).
 
@@ -106,10 +139,10 @@ def pixel_to_mm(pixel_coord, distance_cm, image_dimension, *, focal_px=None, pri
     :param principal_px: optional principal point for this axis, pixels
     :returns: physical distance in millimeters relative to the optical axis,
         or None if the distance is outside the calibrated range (legacy) or
-        None / not positive
+        the pinhole working range (camera mode)
     """
     if focal_px is not None:
-        if distance_cm is None or distance_cm <= 0:
+        if not _pinhole_distance_ok(distance_cm):
             return None
         principal = image_dimension / 2.0 if principal_px is None else principal_px
         return (pixel_coord - principal) * distance_cm * 10.0 / focal_px
@@ -168,11 +201,12 @@ def compute_incisor_distance_3d(
     :param image_width: full photo width in pixels (principal point reference)
     :param image_height: full photo height in pixels (principal point reference)
     :param camera: optional :class:`portrait_analyser.camera.CameraModel`;
-        ``None`` keeps the legacy calibration polynomial
+        ``None`` keeps the legacy calibration polynomial. With a camera, raw
+        depth code 0 ("no depth" in capture-app files) yields None.
     :returns: (distance_3d_mm, upper_distance_cm, lower_distance_cm) or None
     """
-    upper_z_cm = depth_raw_to_distance_cm(upper_depth_raw, float_min, float_max)
-    lower_z_cm = depth_raw_to_distance_cm(lower_depth_raw, float_min, float_max)
+    upper_z_cm = raw_depth_to_distance_cm(upper_depth_raw, float_min, float_max, camera)
+    lower_z_cm = raw_depth_to_distance_cm(lower_depth_raw, float_min, float_max, camera)
 
     if upper_z_cm is None or lower_z_cm is None:
         return None

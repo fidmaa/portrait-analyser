@@ -1324,6 +1324,8 @@ def sample_depth_at_point(
     support_mask=None,
     support_threshold=None,
     inward_y=0,
+    *,
+    invalid_value=None,
 ) -> int | None:
     """Sample depth map at a photo-space coordinate using median filtering.
 
@@ -1333,6 +1335,10 @@ def sample_depth_at_point(
     ``inward_y`` offset in depth pixels can move an incisal-edge sample into the
     tooth surface (negative for an upper tooth, positive for a lower tooth).
     ``support_threshold=None`` uses :func:`teeth_threshold` of the mask.
+    ``invalid_value`` (keyword-only, e.g. ``0`` for capture-app depth maps,
+    where code 0 means "no depth") excludes that raw value from the median;
+    ``None`` returns if every pixel in the kernel is invalid. The default
+    ``None`` keeps legacy behaviour, where code 0 is a valid farthest depth.
     """
     if kernel_size < 1 or kernel_size % 2 == 0:
         raise ValueError("kernel_size must be a positive odd number")
@@ -1386,6 +1392,8 @@ def sample_depth_at_point(
                 # Multi-channel depth maps (e.g. RGB): take first channel
                 if isinstance(px, tuple):
                     px = px[0]
+                if invalid_value is not None and px == invalid_value:
+                    continue
                 values.append(px)
 
     if not values:

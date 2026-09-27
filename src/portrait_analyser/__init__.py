@@ -1,5 +1,6 @@
 from .apple_depth import (
     DISPARITY_FAR_CAP_M,
+    NEAR_PERCENTILE,
     AppleDepthData,
     encode_depth_as_disparity_8bit,
     read_apple_depth,
@@ -49,9 +50,10 @@ from .incisor import (
     pixel_to_mm,
     pixels_per_mm_at_distance,
     point_to_mm,
+    raw_depth_to_distance_cm,
     vector_length_3d,
 )
-from .ios import IOSPortrait, load_image
+from .ios import IOSPortrait, check_depth_plausibility, load_image
 from .local_surface import (
     LocalSurfaceScores,
     SurfaceFeature,
@@ -93,6 +95,9 @@ __all__ = [
     "rotate_by_exif_orientation",
     "pixels_per_mm_at_distance",
     "point_to_mm",
+    "raw_depth_to_distance_cm",
+    "NEAR_PERCENTILE",
+    "check_depth_plausibility",
     "ExifValidationFailed",
     "Eye",
     "Face",

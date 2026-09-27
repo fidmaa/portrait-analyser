@@ -44,12 +44,19 @@ class CameraModel:
     :ivar cx: principal point x, photo pixels (continuous coordinates:
         pixel ``i`` spans ``[i, i + 1)``)
     :ivar cy: principal point y, photo pixels
+    :ivar width: width in pixels of the image these intrinsics refer to
+        (the full-resolution upright photo, e.g. 3024), or None if unknown.
+        Coordinates from a scaled display (e.g. the GUI's 480x640) must be
+        converted to this pixel space before use.
+    :ivar height: height counterpart of ``width``
     """
 
     fx: float
     fy: float
     cx: float
     cy: float
+    width: float | None = None
+    height: float | None = None
 
     def __post_init__(self):
         if not (self.fx > 0 and self.fy > 0):
@@ -63,17 +70,25 @@ class CameraModel:
 
         Returns ``None`` when the portrait carries no usable intrinsics --
         which, deliberately, includes every legacy Camera-app photo (their
-        measurements keep using the calibration polynomial).
+        measurements keep using the calibration polynomial) -- or when its
+        depth is not ``"absolute"``: relative depth has an unknown scale, so
+        a metric pinhole conversion would only look precise.
         """
         focal = getattr(portrait, "focal_length_px", None)
         principal = getattr(portrait, "principal_point_px", None)
         if focal is None or principal is None:
             return None
+        if getattr(portrait, "depth_accuracy", None) != "absolute":
+            return None
+        photo = getattr(portrait, "photo", None)
+        width, height = (None, None) if photo is None else photo.size
         return cls(
             fx=float(focal[0]),
             fy=float(focal[1]),
             cx=float(principal[0]),
             cy=float(principal[1]),
+            width=width,
+            height=height,
         )
 
     def axis(self, axis: str) -> tuple[float, float]:

@@ -15,6 +15,7 @@ from PIL import Image, ImageOps
 
 from portrait_analyser.apple_depth import (
     DISPARITY_FAR_CAP_M,
+    NEAR_PERCENTILE,
     encode_depth_as_disparity_8bit,
 )
 from portrait_analyser.camera import (
@@ -61,11 +62,15 @@ class TestPinholePixelToMm:
     def test_principal_point_defaults_to_image_centre(self):
         assert pixel_to_mm(1600.0, 40.0, 3000, focal_px=2000.0) == pytest.approx(20.0)
 
-    def test_no_calibrated_range_limit(self):
-        # The polynomial refuses 150 cm; the pinhole model does not.
+    def test_pinhole_working_range_is_10_to_150_cm(self):
+        # The polynomial refuses 150 cm; the pinhole model's range is wider
+        # but still bounded (MIN/MAX_PINHOLE_DISTANCE_CM).
         assert pixel_to_mm(1600.0, 150.0, 3000) is None
         assert pixel_to_mm(1600.0, 150.0, 3000, focal_px=2000.0) == pytest.approx(75.0)
-        assert pixel_to_mm(1600.0, 5.0, 3000, focal_px=2000.0) == pytest.approx(2.5)
+        assert pixel_to_mm(1600.0, 10.0, 3000, focal_px=2000.0) == pytest.approx(5.0)
+        for outside in (5.0, 9.9, 150.1, 294.0):
+            assert pixel_to_mm(1600.0, outside, 3000, focal_px=2000.0) is None
+            assert pixels_per_mm_at_distance(outside, focal_px=2000.0) is None
 
     @pytest.mark.parametrize("distance_cm", [None, 0.0, -10.0])
     def test_non_positive_distance_is_rejected(self, distance_cm):
@@ -117,10 +122,20 @@ class TestCameraModel:
         class New:
             focal_length_px = (2766.0, 2765.0)
             principal_point_px = (1499.0, 2019.5)
+            depth_accuracy = "absolute"
+            photo = Image.new("RGB", (3024, 4032))
 
         assert CameraModel.from_portrait(New()) == CameraModel(
-            2766.0, 2765.0, 1499.0, 2019.5
+            2766.0, 2765.0, 1499.0, 2019.5, width=3024, height=4032
         )
+
+    def test_from_portrait_requires_absolute_depth(self):
+        class Relative:
+            focal_length_px = (2766.0, 2765.0)
+            principal_point_px = (1499.0, 2019.5)
+            depth_accuracy = "relative"
+
+        assert CameraModel.from_portrait(Relative()) is None
 
 
 # --------------------------------------------------------------------------
@@ -207,7 +222,8 @@ class TestDisparityEncoding:
         assert image.mode == "L"
         assert image.size == (80, 60)
         valid = np.isfinite(depth) & (depth <= DISPARITY_FAR_CAP_M)
-        assert float_max == pytest.approx(1.0 / np.nanmin(depth[valid]))
+        z_near = np.percentile(depth[valid], NEAR_PERCENTILE)
+        assert float_max == pytest.approx(1.0 / z_near)
         assert float_min == pytest.approx(1.0 / np.nanmax(depth[valid]))
 
         codes = np.asarray(image)
@@ -217,6 +233,10 @@ class TestDisparityEncoding:
         step_disparity = (float_max - float_min) / 255.0
         for (y, x), z_m in np.ndenumerate(depth):
             if not valid[y, x]:
+                continue
+            if z_m < z_near:
+                # Nearer than the robust near end: saturates at Z_near.
+                assert codes[y, x] == 255
                 continue
             decoded_cm = depth_raw_to_distance_cm(
                 int(codes[y, x]), float_min, float_max
@@ -236,6 +256,14 @@ class TestDisparityEncoding:
         _, float_min, float_max = encode_depth_as_disparity_8bit(depth)
         step_mm_at_30_cm = 1000.0 * 0.30**2 * (float_max - float_min) / 255.0
         assert 1.0 < step_mm_at_30_cm < 1.5
+
+    def test_single_near_outlier_does_not_set_the_range(self):
+        depth = np.full((100, 100), 0.35, dtype=np.float32)
+        depth[:, 50:] = 0.60
+        depth[0, 0] = 0.02  # one stray pixel 2 cm from the lens
+        image, _, float_max = encode_depth_as_disparity_8bit(depth)
+        assert float_max == pytest.approx(1.0 / 0.35, rel=1e-3)
+        assert np.asarray(image)[0, 0] == 255
 
     def test_far_cap_limits_range(self):
         depth = np.array([[0.3, 0.5], [2.0, 12.0]], dtype=np.float32)

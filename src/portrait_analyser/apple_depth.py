@@ -80,6 +80,9 @@ MAX_PLAUSIBLE_DEPTH_M = 20.0
 # which the downstream code already ignores as zero disparity.
 DISPARITY_FAR_CAP_M = 3.0
 
+# Percentile of valid depths used as the near end of the 8-bit encoding.
+NEAR_PERCENTILE = 0.1
+
 
 @dataclass
 class AppleDepthData:
@@ -115,6 +118,9 @@ class AppleDepthData:
         photo/mattes as decoded by ``ios.load_image`` -- those are already
         upright and must NOT be rotated by this value too (see the module
         docstring). This module does not apply any rotation itself.
+    :ivar aux_orientation: the ``Orientation`` key of the aux image's
+        ``kCGImageAuxiliaryDataInfoDataDescription`` (describes the depth
+        buffer), or ``None`` when absent. Prefer :attr:`depth_orientation`.
     """
 
     depth_m: "np.ndarray"
@@ -126,6 +132,15 @@ class AppleDepthData:
     intrinsics_reference_size: Optional[Tuple[float, float]]
     lens_distortion_center: Optional[Tuple[float, float]] = None
     exif_orientation: Optional[int] = None
+    aux_orientation: int | None = None
+
+    @property
+    def depth_orientation(self) -> int | None:
+        """Orientation to apply to ``depth_m``: the aux data's own
+        ``Orientation`` (it describes the depth buffer itself) when present,
+        else the primary image's EXIF value. :func:`read_apple_depth`
+        refuses files where both exist and disagree."""
+        return self.aux_orientation if self.aux_orientation is not None else self.exif_orientation
 
 
 def _import_backend():
@@ -227,12 +242,72 @@ def read_apple_depth(path: Union[str, "Path"]) -> Optional[AppleDepthData]:
     :raises AppleDepthUnavailable: not running on macOS, or the pyobjc
         Quartz/AVFoundation frameworks are not importable.
     :raises AppleDepthDecodeError: the file has a depth/disparity aux image
-        but ImageIO/AVFoundation failed to decode it -- a genuine,
-        unexpected failure, surfaced with context rather than swallowed.
+        but ImageIO/AVFoundation failed to decode it, the pyobjc-bridged data
+        had an unexpected shape, or the aux data's orientation disagrees with
+        the EXIF one -- surfaced with context rather than swallowed.
     """
     Quartz, AVFoundation, NSURL = _import_backend()
+    try:
+        return _read_apple_depth(Quartz, AVFoundation, NSURL, str(path))
+    except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+        # pyobjc bridges (e.g. intrinsicMatrix()'s nested tuples, CGSize
+        # attributes) can change shape across macOS / pyobjc versions; any
+        # such surprise is a decode failure of this file, reported with
+        # context rather than as a bare AttributeError/IndexError.
+        raise AppleDepthDecodeError(
+            f"unexpected ImageIO/AVFoundation data while reading depth from "
+            f"{str(path)!r}: {type(exc).__name__}: {exc}"
+        ) from exc
 
-    path_str = str(path)
+
+def _calibration_to_intrinsics(calibration):
+    """``(intrinsics, reference_size, lens_distortion_center)`` from an
+    AVCameraCalibrationData (pyobjc proxy)."""
+    # matrix_float3x3, column-major: column0=(fx,0,0), column1=(0,fy,0),
+    # column2=(cx,cy,1). pyobjc bridges it as a 1-tuple wrapping the
+    # 3x3 tuple-of-columns.
+    matrix = calibration.intrinsicMatrix()[0]
+    intrinsics = (
+        float(matrix[0][0]),
+        float(matrix[1][1]),
+        float(matrix[2][0]),
+        float(matrix[2][1]),
+    )
+    reference_size = calibration.intrinsicMatrixReferenceDimensions()
+    intrinsics_reference_size = (
+        float(reference_size.width),
+        float(reference_size.height),
+    )
+    lens_distortion_center = None
+    center = calibration.lensDistortionCenter()
+    if center is not None:
+        lens_distortion_center = (float(center.x), float(center.y))
+    return intrinsics, intrinsics_reference_size, lens_distortion_center
+
+
+def _aux_orientation(aux_info) -> int | None:
+    """The ``Orientation`` of the aux data's description dictionary, if any."""
+    description = aux_info.get("kCGImageAuxiliaryDataInfoDataDescription")
+    if description is None:
+        return None
+    orientation = description.get("Orientation")
+    return None if orientation is None else int(orientation)
+
+
+def _check_orientations_agree(exif_orientation, aux_orientation, path_str):
+    if (
+        exif_orientation is not None
+        and aux_orientation is not None
+        and exif_orientation != aux_orientation
+    ):
+        raise AppleDepthDecodeError(
+            f"{path_str!r}: the depth aux data's Orientation ({aux_orientation}) "
+            f"disagrees with the primary image's EXIF Orientation "
+            f"({exif_orientation}); refusing to guess how the depth map aligns"
+        )
+
+
+def _read_apple_depth(Quartz, AVFoundation, NSURL, path_str) -> AppleDepthData | None:
     url = NSURL.fileURLWithPath_(path_str)
     source = Quartz.CGImageSourceCreateWithURL(url, None)
     if source is None:
@@ -282,26 +357,13 @@ def read_apple_depth(path: Union[str, "Path"]) -> Optional[AppleDepthData]:
     lens_distortion_center = None
     calibration = depth_data.cameraCalibrationData()
     if calibration is not None:
-        # matrix_float3x3, column-major: column0=(fx,0,0), column1=(0,fy,0),
-        # column2=(cx,cy,1). pyobjc bridges it as a 1-tuple wrapping the
-        # 3x3 tuple-of-columns.
-        matrix = calibration.intrinsicMatrix()[0]
-        intrinsics = (
-            float(matrix[0][0]),
-            float(matrix[1][1]),
-            float(matrix[2][0]),
-            float(matrix[2][1]),
+        intrinsics, intrinsics_reference_size, lens_distortion_center = (
+            _calibration_to_intrinsics(calibration)
         )
-        reference_size = calibration.intrinsicMatrixReferenceDimensions()
-        intrinsics_reference_size = (
-            float(reference_size.width),
-            float(reference_size.height),
-        )
-        center = calibration.lensDistortionCenter()
-        if center is not None:
-            lens_distortion_center = (float(center.x), float(center.y))
 
     exif_orientation = _read_exif_orientation(Quartz, source)
+    aux_orientation = _aux_orientation(aux_info)
+    _check_orientations_agree(exif_orientation, aux_orientation, path_str)
 
     return AppleDepthData(
         depth_m=depth_m,
@@ -313,6 +375,7 @@ def read_apple_depth(path: Union[str, "Path"]) -> Optional[AppleDepthData]:
         intrinsics_reference_size=intrinsics_reference_size,
         lens_distortion_center=lens_distortion_center,
         exif_orientation=exif_orientation,
+        aux_orientation=aux_orientation,
     )
 
 
@@ -327,16 +390,25 @@ def encode_depth_as_disparity_8bit(
     ``disparity = float_max * v / 255 + float_min * (1 - v / 255)`` and
     ``Z_cm = 100 / disparity``). This produces exactly that representation:
 
-    * ``float_max = 1 / Z_near`` with ``Z_near`` the smallest valid depth;
+    * ``float_max = 1 / Z_near`` with ``Z_near`` the
+      :data:`NEAR_PERCENTILE` percentile of valid depths (robust against a
+      single stray near pixel; nearer pixels saturate at code 255);
     * ``float_min = 1 / Z_far`` with ``Z_far = min(largest valid depth,
       far_cap_m)``;
     * ``v = round(255 * (1/Z - float_min) / (float_max - float_min))``.
 
     Pixels that are ``NaN``, ``<= 0`` or farther than ``far_cap_m`` encode as
-    ``0`` ("no depth", which every downstream sampler already treats as
-    invalid). Valid pixels are clamped to ``1..255`` so ``0`` stays reserved
-    for invalid ones: a valid pixel within half a step of ``Z_far`` is
-    reported one quantisation step nearer.
+    ``0``, meaning "no depth". NOTE: ``depth_raw_to_distance_cm(0, ...)``
+    still returns ``Z_far`` -- in Camera-app maps code 0 is simply the
+    farthest depth, so the plain conversion cannot know. Callers must reject
+    code 0 themselves for these maps: the ``camera=`` aware functions
+    (``compute_incisor_distance_3d``, ``compute_tmd_3d``,
+    ``raw_depth_to_distance_cm``), ``sample_depth_at_point(...,
+    invalid_value=0)``, ``bilinear_sample(..., invalid_value=0)`` and the neck
+    samplers do; ``IOSPortrait.depth_valid_mask`` exposes it. Valid pixels are
+    clamped to ``1..255`` so ``0`` stays reserved for invalid ones: a valid
+    pixel within half a step of ``Z_far`` is reported one quantisation step
+    nearer.
 
     Quantisation: one code step is ``(float_max - float_min) / 255`` in
     disparity, i.e. ``~Z**2 * step`` in depth -- about 1.1-1.3 mm at 30 cm
@@ -360,7 +432,10 @@ def encode_depth_as_disparity_8bit(
             f"depth map has no valid pixel between 0 and {far_cap_m} m to encode"
         )
 
-    z_near = float(depth[valid].min())
+    # A robust near end: one stray near pixel must not stretch the code range
+    # (and so coarsen the quantisation) for the whole map. Pixels nearer than
+    # this saturate at code 255 (they decode as Z_near).
+    z_near = float(np.percentile(depth[valid], NEAR_PERCENTILE))
     z_far = min(float(depth[valid].max()), float(far_cap_m))
     float_max = 1.0 / z_near
     # A perfectly flat map has no range to spread; with float_min = 0 every
@@ -370,5 +445,6 @@ def encode_depth_as_disparity_8bit(
     codes = np.zeros(depth.shape, dtype=np.uint8)
     disparity = 1.0 / depth[valid]
     scaled = np.rint(255.0 * (disparity - float_min) / (float_max - float_min))
+    # np.clip also saturates pixels nearer than the robust Z_near at 255.
     codes[valid] = np.clip(scaled, 1, 255).astype(np.uint8)
     return Image.fromarray(codes), float_min, float_max

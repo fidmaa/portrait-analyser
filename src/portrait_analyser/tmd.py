@@ -4,7 +4,7 @@ Computes the physical distance between chin (mentum) and neck midpoint
 using TrueDepth camera calibration data.
 """
 
-from .incisor import depth_raw_to_distance_cm, point_to_mm, vector_length_3d
+from .incisor import point_to_mm, raw_depth_to_distance_cm, vector_length_3d
 
 
 def compute_tmd_3d(
@@ -30,11 +30,12 @@ def compute_tmd_3d(
     :param image_width: full photo width in pixels (principal point reference)
     :param image_height: full photo height in pixels (principal point reference)
     :param camera: optional :class:`portrait_analyser.camera.CameraModel`;
-        ``None`` keeps the legacy calibration polynomial
+        ``None`` keeps the legacy calibration polynomial. With a camera, raw
+        depth code 0 ("no depth" in capture-app files) yields None.
     :returns: (distance_3d_mm, chin_z_cm, neck_z_cm) or None
     """
-    chin_z_cm = depth_raw_to_distance_cm(chin_depth_raw, float_min, float_max)
-    neck_z_cm = depth_raw_to_distance_cm(neck_depth_raw, float_min, float_max)
+    chin_z_cm = raw_depth_to_distance_cm(chin_depth_raw, float_min, float_max, camera)
+    neck_z_cm = raw_depth_to_distance_cm(neck_depth_raw, float_min, float_max, camera)
 
     if chin_z_cm is None or neck_z_cm is None:
         return None
