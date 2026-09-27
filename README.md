@@ -67,7 +67,9 @@ from portrait_analyser import load_image, get_face_parameters, find_neck_measure
 portrait = load_image("photo.heic")
 
 # portrait.photo       -- PIL Image of the photo
-# portrait.depthmap    -- PIL Image of the depth map
+# portrait.depth       -- DepthMap: measure depth through this (see below)
+# portrait.depthmap    -- PIL Image of the 8-bit depth map (display only for
+#                         TrueDepth capture-app files)
 # portrait.teethmap    -- PIL Image of the teeth segmentation mask (or None)
 # portrait.skinmap     -- PIL Image of the skin segmentation mask (or None)
 
@@ -92,7 +94,10 @@ Parses a HEIC/HEIF file and returns an `IOSPortrait` containing the photo, depth
 
 Attributes:
 - `photo` -- primary PIL Image
-- `depthmap` -- depth map as PIL Image
+- `depth` -- `DepthMap` to measure with (see "Depth map" below): wraps the 8-bit map for Camera-app files and the full-precision float map for TrueDepth capture-app files
+- `depthmap` -- depth map as PIL Image (for capture-app files a display-only 8-bit re-encoding; never measure with it)
+- `depth_m` -- full-precision depth in metres (capture-app files only, else `None`)
+- `depth_plausible` / `depth_repaired` -- sanity check of capture-app depth, and how it was repaired on load (`"reciprocal (depth stored as disparity)"` or `None`)
 - `teethmap` -- teeth segmentation mask (PIL Image or `None`)
 - `skinmap` -- skin segmentation mask (PIL Image or `None`)
 - `teeth_bbox` -- bounding box `(x, y, width, height)` of detected teeth, or `None`
@@ -174,6 +179,29 @@ Both extend `Rectangle` (attributes: `x`, `y`, `width`, `height`, `center_x`, `c
 ### Thyromental distance (`tmd` module)
 
 - `compute_tmd_3d(chin_coord, neck_coord, chin_depth_raw, neck_depth_raw, float_min, float_max, image_width, image_height) -> tuple[float, float, float] | None` -- computes the 3D physical distance between chin (mentum) and neck midpoint (a standard airway/intubation-difficulty screening measure), returning `(distance_3d_mm, chin_z_cm, neck_z_cm)`.
+
+### Depth map (`depth_map` module)
+
+`portrait.depth` answers "how far is photo pixel (x, y)?" for every file type.
+Coordinates are pixels of the full-resolution upright photo.
+
+```python
+depth = portrait.depth                   # LegacyDepthMap or FloatDepthMap
+if portrait.depth_plausible is not False:
+    z_cm = depth.distance_cm(x, y, radius=1)          # median of 3x3, None = invalid
+    smooth = depth.median_filtered()                  # invalid-aware 3x3 median
+    profile_cm = smooth.profile(points)               # bilinear cm per point
+    length_mm = smooth.surface_length_mm(points, camera=portrait.camera)
+    mm, z1, z2 = depth.distance_3d_mm(p1, p2, camera=portrait.camera)
+depth.shape, depth.valid_mask, depth.photo_to_depth(x, y)
+depth.to_cm_array()        # float cm, NaN = invalid
+depth.to_display_image()   # 8-bit, display only
+```
+
+- `LegacyDepthMap(image, float_min, float_max, photo_size, *, zero_is_invalid=False)` -- the Camera-app 8-bit disparity map; samples exactly like `sample_depth_at_point` / `median_filter_depthmap` / `sample_filtered_depth`, so results are unchanged.
+- `FloatDepthMap(depth_m, photo_size)` -- full-precision metres (NaN, `<= 0` and `> 20 m` invalid), NaN-aware medians and bilinear sampling, no quantisation, no far cap.
+- Measurement functions (`compute_incisor_distance_3d`, `compute_tmd_3d`, `compute_mouth_measurement_from_facemesh`, `compute_neck_circumference`, `compute_neck_width_3d`, `detect_neck_midpoint_from_dual_mask`, `measure_filtered_surface_length`) take a keyword-only `depth=` DepthMap; the old `depthmap`/`float_min`/`float_max` arguments keep working unchanged.
+- `repair_inverted_depth(depth_m, skinmap, hairmap=None)` -- returns `1 / depth_m` when a capture-app map is implausible but its reciprocal is clearly plausible (depth written into a disparity buffer); `load_image` applies it automatically to absolute capture-app depth.
 
 ### Robust surface-distance measurement (`depth_sampling` module)
 

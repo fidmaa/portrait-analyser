@@ -229,10 +229,11 @@ def test_camera_mode_hole_gives_none_never_z_far(
     assert portrait.incisor_distance_3d_mm is None
 
 
-def test_inverted_depth_is_flagged_and_not_measured(
+def test_inverted_depth_is_repaired_by_reciprocal(
     monkeypatch, heic_face_image_path, fixture_mattes, caplog
 ):
-    # IMG_2348-like: face decodes at ~2.7 m, background at ~0.55 m.
+    # IMG_2348-like: depth stored as disparity -- face decodes at ~2.7 m,
+    # background at ~0.55 m; 1/x gives a 37 cm face before a 1.8 m wall.
     depth = _depth_map(fixture_mattes, face_m=2.7, background_m=0.55)
     _patch_capture_app(monkeypatch, depth)
     _patch_teeth(monkeypatch)
@@ -240,15 +241,98 @@ def test_inverted_depth_is_flagged_and_not_measured(
     with caplog.at_level(logging.WARNING, logger="portrait_analyser.ios"):
         portrait = ios.load_image(str(heic_face_image_path))
 
+    assert portrait.depth_repaired == ios.DEPTH_REPAIRED_RECIPROCAL
+    assert portrait.depth_plausible is True
+    assert "repaired" in caplog.text
+    np.testing.assert_allclose(portrait.depth_m, 1.0 / depth, rtol=1e-6)
+    assert portrait.depth.is_float
+    assert portrait.camera is not None
+    # Everything downstream is re-derived from the repaired map.
+    assert portrait.floatValueMax == pytest.approx(1 / (1 / 2.7), rel=1e-3)
+    display = np.asarray(portrait.depthmap)
+    assert len(np.unique(display[display > 0])) == 2  # face + background only
+    measurement = portrait.incisor_measurement
+    assert measurement.upper_distance_cm == pytest.approx(100 / 2.7, rel=1e-6)
+    assert measurement.distance_3d_mm == pytest.approx(
+        _expected_pinhole_mm(portrait, 1 / 2.7), rel=1e-6
+    )
+
+
+def test_depth_implausible_both_ways_is_not_repaired(
+    monkeypatch, heic_face_image_path, fixture_mattes, caplog
+):
+    # As read: face at 1.5 m (too far). Reciprocal: face 67 cm *behind* a
+    # 33 cm background. Neither interpretation is plausible -> left alone.
+    depth = _depth_map(fixture_mattes, face_m=1.5, background_m=3.0)
+    _patch_capture_app(monkeypatch, depth)
+    _patch_teeth(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="portrait_analyser.ios"):
+        portrait = ios.load_image(str(heic_face_image_path))
+
     assert portrait.depth_plausible is False
+    assert portrait.depth_repaired is None
     assert portrait.camera is None  # second line of defence
     assert portrait.focal_length_px is not None  # still reported
     assert "implausible depth" in caplog.text
     assert portrait.incisor_distance_3d_mm is None
     assert portrait.incisor_measurement.distance_3d_mm is None
     assert portrait.incisor_measurement.upper_depth_raw is None
-    # The file is still loaded (not auto-inverted).
     np.testing.assert_array_equal(portrait.depth_m, depth)
+
+
+def test_capture_app_measures_on_float_depth_not_display_image(
+    monkeypatch, heic_face_image_path, fixture_mattes
+):
+    depth = _depth_map(fixture_mattes, face_m=0.35, background_m=1.8)
+    _patch_capture_app(monkeypatch, depth)
+    _patch_teeth(monkeypatch)
+    reference = ios.load_image(str(heic_face_image_path))
+    assert reference.depth.is_float
+    # Full precision: exactly 35 cm, not an 8-bit step away from it.
+    assert reference.incisor_measurement.upper_distance_cm == pytest.approx(35.0, rel=1e-6)
+    assert reference.incisor_measurement.upper_depth_raw is None  # no codes
+
+    def garbage_encoding(depth_m, far_cap_m=apple_depth.DISPARITY_FAR_CAP_M):
+        rng = np.random.default_rng(0)
+        codes = rng.integers(0, 256, size=np.shape(depth_m), dtype=np.uint8)
+        return Image.fromarray(codes), 0.01, 99.0
+
+    monkeypatch.setattr(
+        "portrait_analyser.depth_map.encode_depth_as_disparity_8bit", garbage_encoding
+    )
+    portrait = ios.load_image(str(heic_face_image_path))
+
+    assert portrait.floatValueMax == 99.0  # the display encoding is garbage ...
+    # ... and no measurement noticed.
+    assert portrait.incisor_measurement == reference.incisor_measurement
+    assert portrait.incisor_distance_3d_mm == reference.incisor_distance_3d_mm
+    assert portrait.depth.distance_cm(1100, 1700) == reference.depth.distance_cm(1100, 1700)
+
+
+def test_relative_inverted_depth_is_not_repaired(
+    monkeypatch, heic_face_image_path, fixture_mattes
+):
+    depth = _depth_map(fixture_mattes, face_m=2.7, background_m=0.55)
+    _patch_capture_app(monkeypatch, depth, accuracy="relative")
+
+    portrait = ios.load_image(str(heic_face_image_path))
+
+    assert portrait.depth_plausible is False
+    assert portrait.depth_repaired is None
+    np.testing.assert_array_equal(portrait.depth_m, depth)
+
+
+def test_camera_app_files_are_never_repaired(monkeypatch, heic_face_image_path):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("repair attempted on Camera-app depth")
+
+    monkeypatch.setattr(ios, "repair_inverted_depth", forbidden)
+    portrait = ios.load_image(str(heic_face_image_path))
+
+    assert portrait.depth_repaired is None
+    assert portrait.depth.kind == "legacy"
+    assert portrait.depth.to_display_image() is portrait.depthmap
 
 
 def test_relative_capture_app_depth_stays_on_polynomial(

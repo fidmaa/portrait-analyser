@@ -11,6 +11,7 @@ from .camera import (
     map_point_by_exif_orientation,
     rotate_by_exif_orientation,
 )
+from .depth_map import DepthMap, DepthSample, FloatDepthMap, LegacyDepthMap
 from .depth_sampling import (
     bilinear_sample,
     measure_filtered_surface_length,
@@ -47,13 +48,20 @@ from .face import (
 from .incisor import (
     compute_incisor_distance_3d,
     depth_raw_to_distance_cm,
+    distance_3d_from_cm,
     pixel_to_mm,
     pixels_per_mm_at_distance,
     point_to_mm,
     raw_depth_to_distance_cm,
     vector_length_3d,
 )
-from .ios import IOSPortrait, check_depth_plausibility, load_image
+from .ios import (
+    DEPTH_REPAIRED_RECIPROCAL,
+    IOSPortrait,
+    check_depth_plausibility,
+    load_image,
+    repair_inverted_depth,
+)
 from .local_surface import (
     LocalSurfaceScores,
     SurfaceFeature,
@@ -98,6 +106,13 @@ __all__ = [
     "raw_depth_to_distance_cm",
     "NEAR_END_MEDIAN_SIZE",
     "check_depth_plausibility",
+    "repair_inverted_depth",
+    "DEPTH_REPAIRED_RECIPROCAL",
+    "DepthMap",
+    "DepthSample",
+    "FloatDepthMap",
+    "LegacyDepthMap",
+    "distance_3d_from_cm",
     "ExifValidationFailed",
     "Eye",
     "Face",

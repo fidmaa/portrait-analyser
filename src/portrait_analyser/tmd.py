@@ -4,7 +4,7 @@ Computes the physical distance between chin (mentum) and neck midpoint
 using TrueDepth camera calibration data.
 """
 
-from .incisor import point_to_mm, raw_depth_to_distance_cm, vector_length_3d
+from .incisor import distance_3d_from_cm, raw_depth_to_distance_cm
 
 
 def compute_tmd_3d(
@@ -19,6 +19,7 @@ def compute_tmd_3d(
     *,
     camera=None,
     zero_is_invalid=None,
+    depth=None,
 ):
     """Compute 3D thyromental distance (chin to neck midpoint).
 
@@ -35,35 +36,22 @@ def compute_tmd_3d(
         depth code 0 ("no depth" in capture-app files) yields None.
     :param zero_is_invalid: ``portrait.depth_code_zero_is_invalid``; None =
         infer from ``camera``
+    :param depth: optional :class:`portrait_analyser.depth_map.DepthMap`
+        (``portrait.depth``); when given, depth is sampled from it at both
+        points (3x3 median) and the raw values / float range are ignored
     :returns: (distance_3d_mm, chin_z_cm, neck_z_cm) or None
     """
-    chin_z_cm = raw_depth_to_distance_cm(
-        chin_depth_raw, float_min, float_max, camera, zero_is_invalid=zero_is_invalid
-    )
-    neck_z_cm = raw_depth_to_distance_cm(
-        neck_depth_raw, float_min, float_max, camera, zero_is_invalid=zero_is_invalid
-    )
+    if depth is not None:
+        chin_z_cm = depth.distance_cm(chin_coord[0], chin_coord[1])
+        neck_z_cm = depth.distance_cm(neck_coord[0], neck_coord[1])
+    else:
+        chin_z_cm = raw_depth_to_distance_cm(
+            chin_depth_raw, float_min, float_max, camera, zero_is_invalid=zero_is_invalid
+        )
+        neck_z_cm = raw_depth_to_distance_cm(
+            neck_depth_raw, float_min, float_max, camera, zero_is_invalid=zero_is_invalid
+        )
 
-    if chin_z_cm is None or neck_z_cm is None:
-        return None
-
-    chin_mm = point_to_mm(
-        chin_coord[0], chin_coord[1], chin_z_cm, image_width, image_height, camera
+    return distance_3d_from_cm(
+        chin_coord, neck_coord, chin_z_cm, neck_z_cm, image_width, image_height, camera
     )
-    neck_mm = point_to_mm(
-        neck_coord[0], neck_coord[1], neck_z_cm, image_width, image_height, camera
-    )
-    if chin_mm is None or neck_mm is None:
-        return None
-    chin_x_mm, chin_y_mm = chin_mm
-    neck_x_mm, neck_y_mm = neck_mm
-
-    chin_z_mm = chin_z_cm * 10
-    neck_z_mm = neck_z_cm * 10
-
-    distance = vector_length_3d(
-        chin_x_mm, chin_y_mm, chin_z_mm,
-        neck_x_mm, neck_y_mm, neck_z_mm,
-    )
-
-    return distance, chin_z_cm, neck_z_cm

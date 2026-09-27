@@ -6,6 +6,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `depth_map` module: one depth abstraction for every measurement.
+  `portrait.depth` is a `DepthMap` answering "camera distance in cm at photo
+  pixel (x, y)": `distance_cm(x, y, radius=1)` (neighbourhood median, None =
+  invalid), `sample()` (`DepthSample`), `bilinear_cm()`, `profile(points)`,
+  `median_filtered(size=3)`, `surface_length_mm(points, camera=)`,
+  `distance_3d_mm(p1, p2, camera=)`, `point_3d_mm()`, `valid_mask`, `shape`,
+  `photo_to_depth()`, `to_cm_array()` and `to_display_image()` (8-bit,
+  display only).
+  - `LegacyDepthMap` wraps the Camera-app 8-bit disparity map +
+    `FloatMinValue`/`FloatMaxValue` and samples it exactly as before
+    (`sample_depth_at_point`, `median_filter_depthmap`,
+    `sample_filtered_depth`, `depth_raw_to_distance_cm`): every Camera-app
+    number is byte-identical.
+  - `FloatDepthMap` wraps the capture app's full-precision `depth_m`
+    (metres; NaN, `<= 0` and `> MAX_PLAUSIBLE_DEPTH_M` invalid): NaN-aware
+    medians, bilinear interpolation that never crosses a hole, a NaN-aware
+    median filter (a pixel is kept when at least half its window is valid),
+    no 8-bit quantisation and no 3 m far cap.
+- Keyword-only `depth=` (a `DepthMap`, e.g. `portrait.depth`) on
+  `compute_incisor_distance_3d`, `compute_tmd_3d`,
+  `compute_mouth_measurement_from_facemesh`, `compute_neck_circumference`,
+  `compute_neck_width_3d`, `detect_neck_midpoint_from_dual_mask` and
+  `measure_filtered_surface_length` (pass an already filtered map there).
+  With it the positional `depthmap`/`float_min`/`float_max` are ignored (may
+  be None); without it they work exactly as before. `find_stable_depth_x_from_edge`
+  also accepts a `DepthMap`.
+- `incisor.distance_3d_from_cm()`: the shared two-point 3-D distance from
+  known camera distances.
+- `repair_inverted_depth()` and `IOSPortrait.depth_repaired`: some
+  capture-app files store depth (metres) in a buffer labelled disparity, so
+  they read as `1/depth` (IMG_2348/IMG_2363: face at 2.5-2.7 m, background
+  at 0.53-0.57 m). When absolute capture-app depth fails the plausibility
+  check and its reciprocal passes it with the background at least
+  `REPAIR_MIN_BACKGROUND_MARGIN_CM` (10 cm) behind the face, `load_image`
+  uses the reciprocal, sets `depth_repaired = "reciprocal (depth stored as
+  disparity)"` (`DEPTH_REPAIRED_RECIPROCAL`) and `depth_plausible = True`,
+  logs a warning, and derives everything (display image, camera,
+  measurements) from the repaired map -- which also removes the posterised
+  face in the display image. Never for Camera-app or relative depth, nor
+  when both or neither interpretation is plausible.
+- `apple_depth.disparity_encoding_range()`; `analyse-portrait` reports the
+  measurement depth kind, plausibility and repair.
+
+### Changed
+
+- Capture-app files are measured on the float depth, not the 8-bit
+  re-encoding: `load_image`'s incisor measurements (centroid and legacy
+  edge points, weak-arch reconciliation) sample `portrait.depth`. Their
+  `IncisorMeasurement.upper_depth_raw`/`lower_depth_raw` (and the mouth
+  measurement's) are now None -- float depth has no codes; use the
+  `*_distance_cm` fields. On the real captures the incisor distance moves by
+  +0.25 mm (IMG_2346: 42.92 -> 43.17 mm) and +0.42 mm (IMG_2347: 47.40 ->
+  47.82 mm) and no longer depends on the encoding range (8-bit results
+  varied by up to 0.4 mm with the far cap).
+- For capture-app files `depthmap`, `floatValueMin` and `floatValueMax` are
+  documented as a display-only encoding (still produced exactly as in
+  0.7.0); `depth_valid_mask` still describes that image, use
+  `portrait.depth.valid_mask` for the measurement map.
+- The chin/body/stable-edge/arc-sag detectors read a "detector scale" from
+  the `DepthMap` (`code_array`, `bilinear_code`, `DepthSample.code`): the
+  stored 8-bit codes for Camera-app maps, the same scale unquantised for
+  float maps.
+
 ## [0.7.0] - 2026-09-27
 
 ### Added

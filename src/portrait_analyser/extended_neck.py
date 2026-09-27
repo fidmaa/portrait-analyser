@@ -362,6 +362,7 @@ def compute_neck_width_3d(
     n_samples: int = 25,
     *,
     camera=None,
+    depth=None,
 ) -> tuple[float | None, float | None]:
     """Compute 3D neck width by sampling points across the neck row.
 
@@ -382,12 +383,18 @@ def compute_neck_width_3d(
         n_samples: Number of sample points across the neck.
         camera: Optional CameraModel (file intrinsics); None keeps the
             legacy calibration polynomial.
+        depth: Optional DepthMap (``portrait.depth``); when given, depth is
+            sampled from it (full precision for capture-app files) and
+            ``depthmap``/``float_min``/``float_max`` are ignored.
 
     Returns:
         (front_arc_mm, straight_width_mm) or (None, None).
     """
-    from .face import sample_depth_at_point
-    from .incisor import depth_raw_to_distance_cm, point_to_mm, vector_length_3d
+    from .depth_map import LegacyDepthMap
+    from .incisor import point_to_mm, vector_length_3d
+
+    if depth is None:
+        depth = LegacyDepthMap(depthmap, float_min, float_max, (photo_width, photo_height))
 
     # Inset edges by 5% to avoid unreliable edge depths
     span = neck_right_x - neck_left_x
@@ -401,13 +408,12 @@ def compute_neck_width_3d(
     # Convert each sample point to 3D (mm)
     points_3d = []
     for x in xs:
-        depth_raw = sample_depth_at_point(
-            depthmap, x, neck_y, photo_width, photo_height
-        )
-        if depth_raw is None or depth_raw == 0:
+        sample = depth.sample(x, neck_y)
+        # Legacy 8-bit maps: code 0 is skipped here, as it always was.
+        if sample is None or sample.raw == 0:
             continue
 
-        z_cm = depth_raw_to_distance_cm(depth_raw, float_min, float_max)
+        z_cm = sample.distance_cm
         if z_cm is None:
             continue
 
@@ -574,6 +580,7 @@ def detect_neck_midpoint_from_dual_mask(
     float_max: float | None = None,
     *,
     camera=None,
+    depth=None,
 ) -> tuple[NeckMidpoint | None, SegmentationDebug | None]:
     """Detect neck midpoint using skin matte, depth map, and silhouette.
 
@@ -594,10 +601,18 @@ def detect_neck_midpoint_from_dual_mask(
         float_max: EXIF FloatMaxValue for depth calibration, or None.
         camera: Optional CameraModel (file intrinsics) for the 3D neck
             width; None keeps the legacy calibration polynomial.
+        depth: Optional DepthMap (``portrait.depth``). When given, the chin /
+            body detection uses its detector-scale array and the 3D neck
+            width its (full-precision) distances; ``depthmap``,
+            ``float_min`` and ``float_max`` are ignored (may be None).
 
     Returns:
         2-tuple of (NeckMidpoint | None, SegmentationDebug | None).
     """
+    from .depth_map import LegacyDepthMap
+
+    if depth is None:
+        depth = LegacyDepthMap(depthmap, float_min, float_max, image.size)
     # Get segmentation mask
     seg_mask = _get_segmentation_mask(image, threshold)
     if seg_mask is None:
@@ -611,10 +626,8 @@ def detect_neck_midpoint_from_dual_mask(
         skin_arr = skin_arr[:, :, 0]
     skin_binary = skin_arr >= skin_threshold
 
-    # Convert depthmap to numpy array
-    depthmap_arr = np.array(depthmap)
-    if depthmap_arr.ndim == 3:
-        depthmap_arr = depthmap_arr[:, :, 0]
+    # Detector-scale array (8-bit codes for legacy maps): high = close.
+    depthmap_arr = depth.code_array()
 
     # Convert hairmap to numpy array
     hair_arr = None
@@ -732,12 +745,11 @@ def detect_neck_midpoint_from_dual_mask(
     # Compute 3D neck width if calibration data and neck edges are available
     neck_width_front_arc_mm = None
     neck_width_straight_mm = None
-    if (
-        float_min is not None
-        and float_max is not None
-        and neck_left_x is not None
-        and neck_right_x is not None
-    ):
+    calibrated = depth.is_float or (
+        getattr(depth, "float_min", None) is not None
+        and getattr(depth, "float_max", None) is not None
+    )
+    if calibrated and neck_left_x is not None and neck_right_x is not None:
         neck_width_front_arc_mm, neck_width_straight_mm = compute_neck_width_3d(
             depthmap,
             neck_y,
@@ -748,6 +760,7 @@ def detect_neck_midpoint_from_dual_mask(
             float_min,
             float_max,
             camera=camera,
+            depth=depth,
         )
         if neck_width_front_arc_mm is not None:
             print(

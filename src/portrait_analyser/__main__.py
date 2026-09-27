@@ -151,6 +151,13 @@ def _inspect_processed(path, skip_exif):
         print(f"  Mode: {result.depthmap.mode}")
         print(f"  FloatValueMin: {result.floatValueMin}")
         print(f"  FloatValueMax: {result.floatValueMax}")
+        depth = result.depth
+        if depth is not None:
+            role = "display only" if depth.is_float else "measured"
+            print(f"  8-bit image role: {role}")
+            print(f"  Measurement depth: {depth.kind}, {depth.shape[1]} x {depth.shape[0]}")
+            print(f"  Plausible: {result.depth_plausible}")
+            print(f"  Repaired: {result.depth_repaired}")
     else:
         print("  Present: NO")
 

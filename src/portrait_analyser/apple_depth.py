@@ -38,9 +38,10 @@ that EXIF rotation applied to line up with the upright photo/mattes -- do
 rotated twice. See :attr:`AppleDepthData.exif_orientation`.
 ``ios.load_image`` applies that rotation (via
 :func:`portrait_analyser.camera.rotate_by_exif_orientation`) when it falls
-back to this reader, and then re-encodes the metric map with
-:func:`encode_depth_as_disparity_8bit` so the rest of the pipeline keeps
-working on the familiar 8-bit disparity image.
+back to this reader, wraps the metric map in a
+:class:`portrait_analyser.depth_map.FloatDepthMap` (``portrait.depth``, used
+for every measurement) and also encodes it with
+:func:`encode_depth_as_disparity_8bit` into a display-only 8-bit image.
 """
 
 from __future__ import annotations
@@ -428,6 +429,47 @@ def _read_apple_depth(Quartz, AVFoundation, NSURL, path_str) -> AppleDepthData |
     )
 
 
+def _encoding_range(depth_m, far_cap_m):
+    """``(depth, valid, float_min, float_max)`` of the 8-bit disparity encoding."""
+    depth = np.asarray(depth_m, dtype=np.float64)
+    if depth.ndim != 2:
+        raise ValueError(f"depth_m must be a 2-D array, got shape {depth.shape}")
+    with np.errstate(invalid="ignore"):
+        valid = np.isfinite(depth) & (depth > 0) & (depth <= far_cap_m)
+    if not valid.any():
+        raise ValueError(
+            f"depth map has no valid pixel between 0 and {far_cap_m} m to encode"
+        )
+
+    # A robust near end: one stray near pixel must not stretch the code range
+    # (and so coarsen the quantisation) for the whole map. Pixels nearer than
+    # this saturate at code 255 (they decode as Z_near).
+    z_near = _robust_near_depth(depth, valid)
+    z_far = min(float(depth[valid].max()), float(far_cap_m))
+    float_max = 1.0 / z_near
+    # A perfectly flat map has no range to spread; with float_min = 0 every
+    # valid pixel encodes as 255 and decodes back to exactly Z_near.
+    float_min = 1.0 / z_far if z_far > z_near else 0.0
+    return depth, valid, float_min, float_max
+
+
+def disparity_encoding_range(
+    depth_m: np.ndarray, far_cap_m: float = DISPARITY_FAR_CAP_M
+) -> tuple[float, float]:
+    """``(float_min, float_max)`` that :func:`encode_depth_as_disparity_8bit`
+    would use for ``depth_m`` -- without building the image.
+
+    Used by :class:`portrait_analyser.depth_map.FloatDepthMap` to express
+    float depth on the familiar 0-255 disparity-code *scale* for the
+    geometric detectors whose thresholds were tuned on 8-bit maps (never for
+    a metric value).
+
+    :raises ValueError: when ``depth_m`` has no valid pixel within the cap
+    """
+    _, _, float_min, float_max = _encoding_range(depth_m, far_cap_m)
+    return float_min, float_max
+
+
 def encode_depth_as_disparity_8bit(
     depth_m: np.ndarray, far_cap_m: float = DISPARITY_FAR_CAP_M
 ) -> tuple[Image.Image, float, float]:
@@ -464,33 +506,19 @@ def encode_depth_as_disparity_8bit(
     disparity, i.e. ``~Z**2 * step`` in depth -- about 1.1-1.3 mm at 30 cm
     and 3-3.6 mm at 50 cm for the ranges seen on real captures
     (``Z_near`` 0.25-0.30 m); the round-trip error is at most half of that
-    (one step for the clamped near-``Z_far`` pixels). The full-precision map
-    should be kept alongside for anything that needs better.
+    (one step for the clamped near-``Z_far`` pixels).
+
+    The result is for *display only*: ``load_image`` measures these files on
+    the full-precision map through
+    :class:`portrait_analyser.depth_map.FloatDepthMap` (``portrait.depth``),
+    with neither this quantisation nor the far cap.
 
     :param depth_m: 2-D float array of depths in metres, ``NaN`` = invalid
     :param far_cap_m: far limit in metres, see :data:`DISPARITY_FAR_CAP_M`
     :returns: ``(image, float_min, float_max)``
     :raises ValueError: when ``depth_m`` has no valid pixel within the cap
     """
-    depth = np.asarray(depth_m, dtype=np.float64)
-    if depth.ndim != 2:
-        raise ValueError(f"depth_m must be a 2-D array, got shape {depth.shape}")
-    with np.errstate(invalid="ignore"):
-        valid = np.isfinite(depth) & (depth > 0) & (depth <= far_cap_m)
-    if not valid.any():
-        raise ValueError(
-            f"depth map has no valid pixel between 0 and {far_cap_m} m to encode"
-        )
-
-    # A robust near end: one stray near pixel must not stretch the code range
-    # (and so coarsen the quantisation) for the whole map. Pixels nearer than
-    # this saturate at code 255 (they decode as Z_near).
-    z_near = _robust_near_depth(depth, valid)
-    z_far = min(float(depth[valid].max()), float(far_cap_m))
-    float_max = 1.0 / z_near
-    # A perfectly flat map has no range to spread; with float_min = 0 every
-    # valid pixel encodes as 255 and decodes back to exactly Z_near.
-    float_min = 1.0 / z_far if z_far > z_near else 0.0
+    depth, valid, float_min, float_max = _encoding_range(depth_m, far_cap_m)
 
     codes = np.zeros(depth.shape, dtype=np.uint8)
     disparity = 1.0 / depth[valid]

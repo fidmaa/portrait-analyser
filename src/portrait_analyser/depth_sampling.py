@@ -16,7 +16,9 @@ import math
 
 from PIL import ImageFilter
 
-from .incisor import depth_raw_to_distance_cm, point_to_mm, vector_length_3d
+# Historically importable from here; kept for compatibility.
+from .incisor import depth_raw_to_distance_cm, point_to_mm, vector_length_3d  # noqa: F401
+
 
 
 def median_filter_depthmap(depthmap, size=3):
@@ -117,12 +119,13 @@ def measure_filtered_surface_length(
     float_max,
     *,
     camera=None,
+    depth=None,
 ):
     """Sum 3D Euclidean distance across consecutive photo-space points,
     reading depth from a pre-filtered map via bilinear sampling.
 
     :param filtered_depthmap: single-channel depth map, typically produced by
-        median_filter_depthmap()
+        median_filter_depthmap() (ignored when ``depth`` is given; may be None)
     :param points_photo: iterable of (x, y) photo-space pixel coordinates,
         e.g. from sample_points_along_line()
     :param photo_width: full photo width in pixels
@@ -131,35 +134,17 @@ def measure_filtered_surface_length(
     :param float_max: EXIF FloatMaxValue
     :param camera: optional :class:`portrait_analyser.camera.CameraModel`;
         ``None`` keeps the legacy calibration polynomial
+    :param depth: optional, already filtered
+        :class:`portrait_analyser.depth_map.DepthMap`, e.g.
+        ``portrait.depth.median_filtered()``; when given, depth is read from
+        it (full precision for capture-app files) instead of
+        ``filtered_depthmap``/``float_min``/``float_max``
     :returns: total length in millimeters, or None if fewer than 2 points
         were given, or any point falls on invalid depth, or any point lies
         outside the calibration polynomial's trustworthy distance range
     """
-    points_3d = []
-    for x, y in points_photo:
-        raw_depth = sample_filtered_depth(
-            filtered_depthmap, x, y, photo_width, photo_height
-        )
-        if raw_depth is None:
-            return None
+    from .depth_map import LegacyDepthMap, surface_length_mm
 
-        z_cm = depth_raw_to_distance_cm(raw_depth, float_min, float_max)
-        if z_cm is None:
-            return None
-
-        point_mm = point_to_mm(x, y, z_cm, photo_width, photo_height, camera)
-        if point_mm is None:
-            # Beyond the calibrated range the conversion is meaningless; a
-            # partial walk would silently report a shorter surface, so fail
-            # the whole measurement instead.
-            return None
-
-        points_3d.append((point_mm[0], point_mm[1], z_cm * 10.0))
-
-    if len(points_3d) < 2:
-        return None
-
-    return sum(
-        vector_length_3d(*point_1, *point_2)
-        for point_1, point_2 in zip(points_3d, points_3d[1:])
-    )
+    if depth is None:
+        depth = LegacyDepthMap(filtered_depthmap, float_min, float_max, (photo_width, photo_height))
+    return surface_length_mm(depth, points_photo, photo_width, photo_height, camera=camera)

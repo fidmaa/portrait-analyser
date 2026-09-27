@@ -12,9 +12,9 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
-from .depth_sampling import median_filter_depthmap, sample_filtered_depth
-from .face import find_neck_measurement_point, sample_depth_at_point
-from .incisor import depth_raw_to_distance_cm, point_to_mm, vector_length_3d
+from .depth_map import DepthMap, LegacyDepthMap
+from .face import find_neck_measurement_point
+from .incisor import point_to_mm, vector_length_3d
 
 
 def _ellipse_circumference(a: float, b: float) -> float:
@@ -191,8 +191,13 @@ def find_stable_depth_x_from_edge(
     Sampling advances by approximately one native depth pixel. The returned
     coordinate is centred within the first run whose consecutive depth changes
     match the quiet part of the profile, avoiding the TrueDepth silhouette wall.
+    ``depthmap`` is a PIL depth image or a
+    :class:`~portrait_analyser.depth_map.DepthMap` (``portrait.depth``).
     """
-    filtered_depthmap = median_filter_depthmap(depthmap, size=3)
+    if not isinstance(depthmap, DepthMap):
+        # Only detector-scale codes are needed here, no calibration.
+        depthmap = LegacyDepthMap(depthmap, None, None, (photo_width, photo_height))
+    filtered_depthmap = depthmap.median_filtered(size=3)
     return _find_stable_depth_x_from_edge(
         filtered_depthmap,
         edge_x,
@@ -224,7 +229,7 @@ def _find_stable_depth_x_from_edge(
     if max_distance <= 0:
         return None
 
-    native_step = max(1.0, (photo_width - 1) / max(1, filtered_depthmap.width - 1))
+    native_step = max(1.0, (photo_width - 1) / max(1, filtered_depthmap.shape[1] - 1))
     sample_distances = list(
         np.arange(0.0, max_distance + native_step * 0.25, native_step)
     )
@@ -242,15 +247,7 @@ def _find_stable_depth_x_from_edge(
         ):
             values.append(None)
             continue
-        values.append(
-            sample_filtered_depth(
-                filtered_depthmap,
-                position,
-                y,
-                photo_width,
-                photo_height,
-            )
-        )
+        values.append(filtered_depthmap.bilinear_code(position, y))
 
     differences = [
         abs(right - left)
@@ -343,6 +340,8 @@ def _depth_amplitude_at_sag(
     """Compute max-min depth amplitude along a half-sine arc at given sag.
 
     *sag* is in photo-space pixels (how far the arc center dips below neck_y).
+    *depthmap* is a :class:`~portrait_analyser.depth_map.DepthMap`; the
+    amplitude is in its detector scale (8-bit codes for legacy maps).
     Returns the amplitude (max depth - min depth), or None if fewer than 2
     valid depth samples could be read.
     """
@@ -354,7 +353,8 @@ def _depth_amplitude_at_sag(
     for sx in sample_xs:
         t = (sx - x_left) / span
         sample_y = neck_y + round(sag * math.sin(math.pi * t))
-        raw = sample_depth_at_point(depthmap, sx, sample_y, photo_width, photo_height)
+        sample = depthmap.sample(sx, sample_y)
+        raw = None if sample is None else sample.code
         if raw is not None and raw > 0:
             depths.append(raw)
 
@@ -425,6 +425,7 @@ def compute_neck_circumference(
     hair_threshold=30,
     *,
     camera=None,  # CameraModel or None (None = legacy calibration polynomial)
+    depth=None,  # DepthMap (portrait.depth) -- replaces depthmap/float_min/float_max
 ) -> NeckMeasurement | None:
     """Compute neck circumference by densely sampling the front arc.
 
@@ -437,7 +438,15 @@ def compute_neck_circumference(
 
     Returns NeckMeasurement with all data, or None if the neck cannot
     be located (e.g. no skin detected below the face).
+
+    Pass ``depth=portrait.depth`` (a
+    :class:`~portrait_analyser.depth_map.DepthMap`) to measure capture-app
+    files on their full-precision float depth; ``depthmap``/``float_min``/
+    ``float_max`` are then ignored (may be None). Without it the 8-bit
+    ``depthmap`` is used exactly as before.
     """
+    if depth is None:
+        depth = LegacyDepthMap(depthmap, float_min, float_max, (photo_width, photo_height))
     # Neutralise white borders that some skinmaps have — paint a
     # 30-pixel black frame so border pixels are never mistaken for skin.
     skinmap = _prepare_neck_skinmap(
@@ -518,7 +527,7 @@ def compute_neck_circumference(
     # Median-filter once, then walk inward from both segmentation edges until
     # the depth profile settles. This replaces the fixed 5% inset, which can
     # stop either inside a broad silhouette wall or unnecessarily far inward.
-    filtered_depthmap = median_filter_depthmap(depthmap, size=3)
+    filtered_depthmap = depth.median_filtered(size=3)
     max_edge_search = max(6, round(neck_width * 0.12))
     stable_left = _find_stable_depth_x_from_edge(
         filtered_depthmap,
@@ -556,7 +565,7 @@ def compute_neck_circumference(
         if arc_sag is None:
             amplitude = (
                 _find_best_sag(
-                    depthmap,
+                    depth,
                     sample_xs,
                     neck_y,
                     x_left,
@@ -568,7 +577,7 @@ def compute_neck_circumference(
             )
         else:
             # Manual arc_sag is in depth-map pixels; scale to photo resolution.
-            amplitude = arc_sag * photo_height / depthmap.size[1]
+            amplitude = arc_sag * photo_height / depth.shape[0]
 
     # Step 3: For each sample point, compute Y via half-sine arc,
     # read depth and convert to 3D coordinates.
@@ -586,19 +595,8 @@ def compute_neck_circumference(
         t = (sx - x_left) / (x_right - x_left)
         sample_y = neck_y + round(amplitude * math.sin(math.pi * t))
 
-        raw_depth = sample_filtered_depth(
-            filtered_depthmap,
-            sx,
-            sample_y,
-            photo_width,
-            photo_height,
-        )
-        if raw_depth is None:
-            # Skip points where depth data is missing or zero (invalid disparity)
-            continue
-
-        # Convert raw depth pixel value to physical distance in cm
-        z_cm = depth_raw_to_distance_cm(raw_depth, float_min, float_max)
+        # Camera distance in cm (None where depth is missing / invalid).
+        z_cm = filtered_depthmap.bilinear_cm(sx, sample_y)
         if z_cm is None:
             continue
 

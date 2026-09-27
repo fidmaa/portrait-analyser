@@ -15,7 +15,9 @@ class IncisorMeasurement:
     # robust representatives of the facing incisal edges, not whole-tooth means.
     upper_centroid: tuple[float, float]  # (x, y) in photo/teethmap coordinates
     lower_centroid: tuple[float, float]  # (x, y) in photo/teethmap coordinates
-    upper_depth_raw: int | None = None  # raw pixel value from depth map
+    # 8-bit code the depth median picked (Camera-app maps); None for
+    # capture-app files, which are measured on float depth (no codes).
+    upper_depth_raw: int | None = None
     lower_depth_raw: int | None = None
     upper_distance_cm: float | None = None  # physical distance from camera (cm)
     lower_distance_cm: float | None = None

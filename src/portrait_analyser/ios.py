@@ -9,8 +9,9 @@ import pyheif
 from PIL import Image, ImageDraw
 
 from . import const
-from .apple_depth import encode_depth_as_disparity_8bit, read_apple_depth
+from .apple_depth import MAX_PLAUSIBLE_DEPTH_M, read_apple_depth
 from .camera import CameraModel, intrinsics_in_photo_space, rotate_by_exif_orientation
+from .depth_map import FloatDepthMap, LegacyDepthMap
 from .exceptions import (
     AppleDepthDecodeError,
     AppleDepthUnavailable,
@@ -24,10 +25,9 @@ from .face import (
     find_incisor_centroids,
     find_incisor_distance_teeth,
     IncisorMeasurement,
-    sample_depth_at_point,
     teeth_threshold,
 )
-from .incisor import compute_incisor_distance_3d, depth_raw_to_distance_cm
+from .incisor import depth_raw_to_distance_cm, distance_3d_from_cm
 
 logger = logging.getLogger(__name__)
 
@@ -71,15 +71,44 @@ def _reconcile_weak_arch_depth(upper_raw, lower_raw, weak_side, float_min, float
     return upper_raw, upper_raw, "lower"
 
 
+def _reconcile_weak_arch_samples(upper, lower, weak_side):
+    """:func:`_reconcile_weak_arch_depth` for ``DepthSample`` objects.
+
+    Compares the samples' distances (for legacy 8-bit maps exactly the
+    conversion the raw-code version uses) and, when the weak arch's depth is
+    implausible, copies the strong arch's whole sample over it.
+    """
+    if weak_side is None or upper is None or lower is None:
+        return upper, lower, None
+    upper_cm = upper.distance_cm
+    lower_cm = lower.distance_cm
+    if (
+        upper_cm is not None
+        and lower_cm is not None
+        and abs(upper_cm - lower_cm) <= MAX_INCISAL_DEPTH_DIFFERENCE_CM
+    ):
+        return upper, lower, None
+    if weak_side == "upper":
+        return lower, lower, "upper"
+    return upper, upper, "lower"
+
+
 class IOSPortrait:
     """A loaded portrait photo with its depth map and semantic mattes.
 
-    ``photo`` is RGB, upright. ``depthmap`` is an 8-bit disparity image
-    decoded with ``floatValueMin``/``floatValueMax`` via
-    ``depth_raw_to_distance_cm``; its PIL mode differs by source: Camera-app
-    files give mode ``"RGB"`` (use channel 0; e.g. 576x768 or 480x640),
-    capture-app files give mode ``"L"`` (e.g. 480x640 / 640x480). Code 0 is
-    a valid farthest depth in the former and "no depth" in the latter -- see
+    ``photo`` is RGB, upright. **Measure depth through** :attr:`depth`, a
+    :class:`~portrait_analyser.depth_map.DepthMap`: for Camera-app files it
+    wraps the 8-bit map exactly as before, for capture-app files it samples
+    the full-precision float map ``depth_m``.
+
+    ``depthmap`` is an 8-bit disparity image decoded with
+    ``floatValueMin``/``floatValueMax`` via ``depth_raw_to_distance_cm``; its
+    PIL mode differs by source: Camera-app files give mode ``"RGB"`` (use
+    channel 0; e.g. 576x768 or 480x640) and it *is* their depth data.
+    Capture-app files give mode ``"L"`` (e.g. 480x640 / 640x480) and it is a
+    **display-only** re-encoding of ``depth_m`` (quantised, 3 m far cap) that
+    no library measurement reads. Code 0 is a valid farthest depth in the
+    former and "no depth" in the latter -- see
     :attr:`depth_code_zero_is_invalid` / :attr:`depth_valid_mask`.
     ``teethmap``/``skinmap``/``hairmap`` are ``"L"`` at photo size (or None).
     """
@@ -105,6 +134,8 @@ class IOSPortrait:
         focal_length_px=None,
         principal_point_px=None,
         depth_plausible=None,
+        depth=None,
+        depth_repaired=None,
     ):
         self.photo = photo
         self.depthmap = depthmap
@@ -125,8 +156,9 @@ class IOSPortrait:
         # Full-precision depth in metres (float32, NaN = invalid), rotated to
         # the upright photo's orientation, at the depth sensor's resolution.
         # Only set for files whose depth was read via the macOS
-        # ImageIO/AVFoundation reader (the 16-bit capture-app format);
-        # ``depthmap`` is its 8-bit disparity re-encoding.
+        # ImageIO/AVFoundation reader (the 16-bit capture-app format), after
+        # any repair (``depth_repaired``). ``depthmap`` is its display-only
+        # 8-bit re-encoding; measurements sample this map via ``depth``.
         self.depth_m = depth_m
         # AVDepthData accuracy: "absolute", "relative", or None if unknown
         # (not macOS / pyobjc unavailable). "relative" depth (iPhone 17 Pro
@@ -141,11 +173,46 @@ class IOSPortrait:
         self.principal_point_px = principal_point_px
         # Sanity check of capture-app depth against the skin/hair mattes:
         # True = face depth plausible (15-100 cm and nearer than the
-        # background), False = implausible (e.g. inverted depth) or depth not
+        # background, possibly after the reciprocal repair -- see
+        # ``depth_repaired``), False = implausible (e.g. inverted depth that
+        # could not be repaired unambiguously) or depth not
         # alignable with the photo -- load_image then skips its automatic
         # 3-D measurements and callers should not measure either; None = not
         # checked (Camera-app files, or no skin matte).
         self.depth_plausible = depth_plausible
+        # How the depth map was repaired on load, or None (never for
+        # Camera-app files). See DEPTH_REPAIRED_RECIPROCAL.
+        self.depth_repaired = depth_repaired
+        self._depth = depth
+
+    @property
+    def depth(self):
+        """The portrait's :class:`~portrait_analyser.depth_map.DepthMap`, or None.
+
+        ``FloatDepthMap`` over ``depth_m`` for capture-app files,
+        ``LegacyDepthMap`` over ``depthmap`` + ``floatValueMin``/``Max`` for
+        Camera-app files; None without depth. Built by ``load_image`` (or on
+        first access for hand-made portraits). Check
+        ``depth_plausible is not False`` before measuring.
+        """
+        if self._depth is None:
+            if self.photo is None:
+                return None
+            if self.depth_m is not None:
+                self._depth = FloatDepthMap(self.depth_m, self.photo.size)
+            elif self.depthmap is not None:
+                self._depth = LegacyDepthMap(
+                    self.depthmap,
+                    self.floatValueMin,
+                    self.floatValueMax,
+                    self.photo.size,
+                    zero_is_invalid=False,
+                )
+        return self._depth
+
+    @depth.setter
+    def depth(self, value):
+        self._depth = value
 
     @property
     def depth_code_zero_is_invalid(self):
@@ -161,10 +228,13 @@ class IOSPortrait:
 
     @property
     def depth_valid_mask(self):
-        """Boolean array (depthmap rows x cols) of pixels holding real depth.
+        """Boolean array (depthmap rows x cols) of 8-bit ``depthmap`` codes
+        holding depth.
 
         Only for capture-app files (``depthmap != 0``); ``None`` for
-        Camera-app files, where every code is a valid depth.
+        Camera-app files, where every code is a valid depth. This describes the
+        display image (pixels beyond its 3 m cap are 0); for the measurement
+        map use ``portrait.depth.valid_mask``.
         """
         if not self.depth_code_zero_is_invalid or self.depthmap is None:
             return None
@@ -342,15 +412,14 @@ def _load_depth_via_apple(fileName, pyheif_error):
 
 
 def _apple_depth_for_photo(apple, fileName, photo_size):
-    """Upright depth (metres), its 8-bit encoding, photo intrinsics, alignment.
+    """Upright depth (metres), photo intrinsics, alignment.
 
     The depth map comes in sensor orientation; the photo/mattes are already
     upright, so only the depth is rotated -- by the aux data's own
     Orientation (``AppleDepthData.depth_orientation``, EXIF as fallback).
-    Returns ``(depth_m, depth_image, float_min, float_max, focal, principal,
-    aligned)``; when the orientation is unknown or the rotated map's aspect
-    does not match the photo, ``aligned`` is False and no intrinsics are
-    returned.
+    Returns ``(depth_m, focal, principal, aligned)``; when the orientation is
+    unknown or the rotated map's aspect does not match the photo, ``aligned``
+    is False and no intrinsics are returned.
     """
     orientation = apple.depth_orientation
     depth_m = rotate_by_exif_orientation(apple.depth_m, orientation)
@@ -376,10 +445,6 @@ def _apple_depth_for_photo(apple, fileName, photo_size):
             orientation,
         )
         aligned = False
-    try:
-        depth_image, float_min, float_max = encode_depth_as_disparity_8bit(depth_m)
-    except ValueError as exc:
-        raise NoDepthMapFound(f"{fileName}: depth map has no usable pixels: {exc}") from exc
 
     focal = principal = None
     if aligned and apple.intrinsics is not None and apple.intrinsics_reference_size is not None:
@@ -391,15 +456,7 @@ def _apple_depth_for_photo(apple, fileName, photo_size):
             orientation,
             photo_size,
         )
-    return (
-        np.ascontiguousarray(depth_m),
-        depth_image,
-        float_min,
-        float_max,
-        focal,
-        principal,
-        aligned,
-    )
+    return np.ascontiguousarray(depth_m), focal, principal, aligned
 
 
 # Plausible camera-to-face distance for the depth sanity check, cm.
@@ -415,9 +472,10 @@ def check_depth_plausibility(depth_m, skinmap, hairmap=None):
     :data:`PLAUSIBLE_FACE_DEPTH_CM` and be nearer than the median depth of
     pixels that are neither skin nor hair (the background). Catches e.g. a
     capture whose depth came out inverted (face at ~2.7 m, background at
-    ~0.6 m). Never "fixes" the map.
+    ~0.6 m). Never "fixes" the map itself -- see :func:`repair_inverted_depth`.
 
-    :param depth_m: ``(h, w)`` metres, NaN = invalid
+    :param depth_m: ``(h, w)`` metres, NaN = invalid, or a
+        :class:`~portrait_analyser.depth_map.FloatDepthMap`
     :param skinmap: PIL "L" skin matte (any size; resized to the depth map)
     :param hairmap: optional PIL "L" hair matte
     :returns: ``(plausible, skin_median_cm, background_median_cm)``;
@@ -426,6 +484,8 @@ def check_depth_plausibility(depth_m, skinmap, hairmap=None):
     """
     if skinmap is None or depth_m is None:
         return None, None, None
+    if isinstance(depth_m, FloatDepthMap):
+        depth_m = depth_m.depth_m
     height, width = depth_m.shape
     skin = np.asarray(skinmap.convert("L").resize((width, height))) >= (
         _PLAUSIBILITY_MATTE_THRESHOLD
@@ -444,6 +504,63 @@ def check_depth_plausibility(depth_m, skinmap, hairmap=None):
     low, high = PLAUSIBLE_FACE_DEPTH_CM
     plausible = low <= skin_cm <= high and (background_cm is None or skin_cm < background_cm)
     return plausible, skin_cm, background_cm
+
+
+# ``IOSPortrait.depth_repaired`` value for a map repaired by taking 1/depth.
+DEPTH_REPAIRED_RECIPROCAL = "reciprocal (depth stored as disparity)"
+
+# For the reciprocal repair the background must lie at least this much
+# farther than the face (medians), so that only an unambiguous inversion is
+# repaired. Real inverted captures (IMG_2348/IMG_2363) give ~37-40 cm faces
+# against backgrounds 1.3-1.9 m away.
+REPAIR_MIN_BACKGROUND_MARGIN_CM = 10.0
+
+
+def _reciprocal_depth(depth_m):
+    with np.errstate(divide="ignore", invalid="ignore"):
+        reciprocal = (1.0 / np.asarray(depth_m)).astype(np.float32)
+        invalid = (
+            ~np.isfinite(reciprocal) | (reciprocal <= 0) | (reciprocal > MAX_PLAUSIBLE_DEPTH_M)
+        )
+    reciprocal[invalid] = np.nan
+    return reciprocal
+
+
+def repair_inverted_depth(depth_m, skinmap, hairmap=None):
+    """Repair capture-app depth that was written inverted, if unambiguous.
+
+    Some TrueDepth capture-app files store *depth* values (metres) in a
+    buffer labelled disparity, so reading them as disparity yields
+    ``1 / depth``: the face lands at ~2.5-2.7 m with the background at
+    ~0.55 m. Such a map fails :func:`check_depth_plausibility`, while its
+    reciprocal passes it with a wide margin.
+
+    The reciprocal is returned only when the map as read is implausible
+    (``False``, not merely unknown), the reciprocal is plausible, and the
+    reciprocal's background median is at least
+    :data:`REPAIR_MIN_BACKGROUND_MARGIN_CM` farther than its face median.
+    When both interpretations pass, both fail, or there is no background or
+    skin to judge by, nothing is repaired. Never apply this to Camera-app
+    (8-bit) depth.
+
+    :param depth_m: upright metres, NaN = invalid
+    :returns: ``(repaired_depth_m or None, reciprocal_check)`` where
+        ``reciprocal_check`` is ``check_depth_plausibility``'s tuple for the
+        reciprocal map (``(None, None, None)`` when it was not evaluated)
+    """
+    plausible, _, _ = check_depth_plausibility(depth_m, skinmap, hairmap)
+    if plausible is not False:
+        return None, (None, None, None)
+    reciprocal = _reciprocal_depth(depth_m)
+    check = check_depth_plausibility(reciprocal, skinmap, hairmap)
+    r_plausible, r_skin_cm, r_background_cm = check
+    if (
+        r_plausible is True
+        and r_background_cm is not None
+        and r_background_cm - r_skin_cm >= REPAIR_MIN_BACKGROUND_MARGIN_CM
+    ):
+        return reciprocal, check
+    return None, check
 
 
 def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
@@ -489,6 +606,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
             apple_depth = _load_depth_via_apple(fileName, exc)
 
         depth_m = depth_accuracy = depth_filtered = None
+        depth_image = float_min = float_max = None
         depth_aligned = True
         focal_length_px = principal_point_px = None
         if apple_depth is None:
@@ -507,24 +625,19 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         if apple_depth is not None:
             depth_accuracy = apple_depth.accuracy
             depth_filtered = apple_depth.filtered
-            (
-                depth_m,
-                depth_image,
-                float_min,
-                float_max,
-                focal_length_px,
-                principal_point_px,
-                depth_aligned,
-            ) = _apple_depth_for_photo(apple_depth, fileName, picture_image.size)
+            depth_m, focal_length_px, principal_point_px, depth_aligned = (
+                _apple_depth_for_photo(apple_depth, fileName, picture_image.size)
+            )
 
         # Decode semantic maps
         teeth_image = _decode_semantic_map(teeth_raw) if teeth_raw else None
         skin_image = _decode_semantic_map(skin_raw) if skin_raw else None
         hair_image = _decode_semantic_map(hair_raw) if hair_raw else None
 
-    # Capture-app depth: sanity checks before anything is measured with it.
+    # Capture-app depth: sanity checks (and the inverted-depth repair) before
+    # anything is measured with it.
     depth_plausible = None
-    zero_invalid = depth_m is not None  # code 0 = "no depth" (capture app)
+    depth_repaired = None
     if depth_m is not None:
         if not depth_aligned:
             depth_plausible = False
@@ -532,6 +645,24 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
             depth_plausible, skin_cm, background_cm = check_depth_plausibility(
                 depth_m, skin_image, hair_image
             )
+            if depth_plausible is False and depth_accuracy == "absolute":
+                repaired, (_, fixed_skin_cm, fixed_background_cm) = repair_inverted_depth(
+                    depth_m, skin_image, hair_image
+                )
+                if repaired is not None:
+                    logger.warning(
+                        "%s: depth looks inverted (skin median %.1f cm, background "
+                        "median %s cm); its reciprocal is plausible (skin %.1f cm, "
+                        "background %.1f cm) -- repaired as depth stored as disparity",
+                        fileName,
+                        skin_cm,
+                        "n/a" if background_cm is None else f"{background_cm:.1f}",
+                        fixed_skin_cm,
+                        fixed_background_cm,
+                    )
+                    depth_m = repaired
+                    depth_repaired = DEPTH_REPAIRED_RECIPROCAL
+                    depth_plausible = True
             if depth_plausible is False:
                 logger.warning(
                     "%s: implausible depth (skin median %.1f cm, background median "
@@ -549,8 +680,18 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                 fileName,
                 depth_accuracy,
             )
+        # Every measurement samples this float map; the 8-bit image is only
+        # for display (and for pre-0.8 callers of depthmap/floatValueMin/Max).
+        depth = FloatDepthMap(depth_m, picture_image.size)
+        try:
+            depth_image, float_min, float_max = depth.display_encoding()
+        except ValueError as exc:
+            raise NoDepthMapFound(f"{fileName}: depth map has no usable pixels: {exc}") from exc
+    else:
+        depth = LegacyDepthMap(
+            depth_image, float_min, float_max, picture_image.size, zero_is_invalid=False
+        )
     measure_depth = depth_plausible is not False
-    sample_invalid = 0 if zero_invalid else None
 
     # File intrinsics: only capture-app files with absolute, aligned depth.
     # None = calibration polynomial.
@@ -605,53 +746,36 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
             )
 
             # 3D distance for legacy edge-of-gap points
-            if (
-                incisor_distance is not None
-                and depth_image is not None
-                and measure_depth
-                and float_min is not None
-                and float_max is not None
-            ):
+            photo_w, photo_h = picture_image.size
+            if incisor_distance is not None and measure_depth:
                 # Legacy format: (x, y1, x, y2)
                 lx1, ly1, lx2, ly2 = incisor_distance
-                photo_w, photo_h = picture_image.size
-                ld_upper = sample_depth_at_point(
-                    depth_image,
+                ld_upper = depth.sample(
                     lx1,
                     ly1,
-                    photo_w,
-                    photo_h,
                     support_mask=teeth_mask,
                     support_threshold=MASK_ON,
                     inward_y=-1,
-                    invalid_value=sample_invalid,
                 )
-                ld_lower = sample_depth_at_point(
-                    depth_image,
+                ld_lower = depth.sample(
                     lx2,
                     ly2,
-                    photo_w,
-                    photo_h,
                     support_mask=teeth_mask,
                     support_threshold=MASK_ON,
                     inward_y=1,
-                    invalid_value=sample_invalid,
                 )
-                ld_upper, ld_lower, _ = _reconcile_weak_arch_depth(
-                    ld_upper, ld_lower, teeth_arches.weak_side, float_min, float_max
+                ld_upper, ld_lower, _ = _reconcile_weak_arch_samples(
+                    ld_upper, ld_lower, teeth_arches.weak_side
                 )
                 if ld_upper is not None and ld_lower is not None:
-                    legacy_3d = compute_incisor_distance_3d(
+                    legacy_3d = distance_3d_from_cm(
                         (float(lx1), float(ly1)),
                         (float(lx2), float(ly2)),
-                        ld_upper,
-                        ld_lower,
-                        float(float_min),
-                        float(float_max),
+                        ld_upper.distance_cm,
+                        ld_lower.distance_cm,
                         photo_w,
                         photo_h,
-                        camera=camera,
-                        zero_is_invalid=zero_invalid,
+                        camera,
                     )
                     if legacy_3d is not None:
                         incisor_distance_3d_mm = legacy_3d[0]
@@ -671,57 +795,39 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                 distance_3d_mm = None
                 depth_assumed = None
 
-                if depth_image is not None and measure_depth:
-                    photo_w, photo_h = picture_image.size
-                    upper_depth_raw = sample_depth_at_point(
-                        depth_image,
+                if measure_depth:
+                    upper_sample = depth.sample(
                         upper_c[0],
                         upper_c[1],
-                        photo_w,
-                        photo_h,
                         support_mask=teeth_mask,
                         support_threshold=MASK_ON,
                         inward_y=-1,
-                        invalid_value=sample_invalid,
                     )
-                    lower_depth_raw = sample_depth_at_point(
-                        depth_image,
+                    lower_sample = depth.sample(
                         lower_c[0],
                         lower_c[1],
-                        photo_w,
-                        photo_h,
                         support_mask=teeth_mask,
                         support_threshold=MASK_ON,
                         inward_y=1,
-                        invalid_value=sample_invalid,
                     )
-                    upper_depth_raw, lower_depth_raw, depth_assumed = (
-                        _reconcile_weak_arch_depth(
-                            upper_depth_raw,
-                            lower_depth_raw,
-                            teeth_arches.weak_side,
-                            float_min,
-                            float_max,
+                    upper_sample, lower_sample, depth_assumed = (
+                        _reconcile_weak_arch_samples(
+                            upper_sample, lower_sample, teeth_arches.weak_side
                         )
                     )
+                    # 8-bit codes (legacy maps only; None for float depth).
+                    upper_depth_raw = None if upper_sample is None else upper_sample.raw
+                    lower_depth_raw = None if lower_sample is None else lower_sample.raw
 
-                    if (
-                        upper_depth_raw is not None
-                        and lower_depth_raw is not None
-                        and float_min is not None
-                        and float_max is not None
-                    ):
-                        result_3d = compute_incisor_distance_3d(
+                    if upper_sample is not None and lower_sample is not None:
+                        result_3d = distance_3d_from_cm(
                             upper_c,
                             lower_c,
-                            upper_depth_raw,
-                            lower_depth_raw,
-                            float(float_min),
-                            float(float_max),
+                            upper_sample.distance_cm,
+                            lower_sample.distance_cm,
                             photo_w,
                             photo_h,
-                            camera=camera,
-                            zero_is_invalid=zero_invalid,
+                            camera,
                         )
                         if result_3d is not None:
                             distance_3d_mm, upper_distance_cm, lower_distance_cm = (
@@ -769,6 +875,8 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         focal_length_px=focal_length_px,
         principal_point_px=principal_point_px,
         depth_plausible=depth_plausible,
+        depth=depth,
+        depth_repaired=depth_repaired,
     )
 
 

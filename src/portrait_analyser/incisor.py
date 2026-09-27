@@ -183,6 +183,45 @@ def vector_length_3d(x1, y1, z1, x2, y2, z2):
     return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2 + (z2 - z1) ** 2)
 
 
+def distance_3d_from_cm(point_a, point_b, z_a_cm, z_b_cm, image_width, image_height, camera=None):
+    """3-D distance between two photo-space points whose camera distances are known.
+
+    The shared core of every two-point measurement (incisors, mouth, TMD):
+    each point goes through :func:`point_to_mm` at its own depth, then the
+    Euclidean length is taken with Z in mm.
+
+    :param point_a: ``(x, y)`` photo-space pixels
+    :param point_b: ``(x, y)`` photo-space pixels
+    :param z_a_cm: camera distance of ``point_a`` in cm, or None
+    :param z_b_cm: camera distance of ``point_b`` in cm, or None
+    :param image_width: full photo width (principal point reference)
+    :param image_height: full photo height
+    :param camera: optional :class:`portrait_analyser.camera.CameraModel`
+    :returns: ``(distance_3d_mm, z_a_cm, z_b_cm)`` or None when a depth is
+        missing or a point is outside the working range
+    """
+    if z_a_cm is None or z_b_cm is None:
+        return None
+
+    a_mm = point_to_mm(point_a[0], point_a[1], z_a_cm, image_width, image_height, camera)
+    b_mm = point_to_mm(point_b[0], point_b[1], z_b_cm, image_width, image_height, camera)
+    if a_mm is None or b_mm is None:
+        return None
+    a_x_mm, a_y_mm = a_mm
+    b_x_mm, b_y_mm = b_mm
+
+    # Convert Z from cm to mm for consistent units
+    a_z_mm = z_a_cm * 10
+    b_z_mm = z_b_cm * 10
+
+    distance = vector_length_3d(
+        a_x_mm, a_y_mm, a_z_mm,
+        b_x_mm, b_y_mm, b_z_mm,
+    )
+
+    return distance, z_a_cm, z_b_cm
+
+
 def compute_incisor_distance_3d(
     upper_centroid,
     lower_centroid,
@@ -195,6 +234,7 @@ def compute_incisor_distance_3d(
     *,
     camera=None,
     zero_is_invalid=None,
+    depth=None,
 ):
     """Compute 3D Euclidean distance between upper and lower incisor centroids.
 
@@ -214,36 +254,23 @@ def compute_incisor_distance_3d(
         depth code 0 ("no depth" in capture-app files) yields None.
     :param zero_is_invalid: ``portrait.depth_code_zero_is_invalid``; None =
         infer from ``camera`` (see :func:`raw_depth_to_distance_cm`)
+    :param depth: optional :class:`portrait_analyser.depth_map.DepthMap`
+        (``portrait.depth``). When given, the depth at each centroid is
+        sampled from it (3x3 median, full precision for capture-app files)
+        and the raw values / ``float_min`` / ``float_max`` are ignored.
     :returns: (distance_3d_mm, upper_distance_cm, lower_distance_cm) or None
     """
-    upper_z_cm = raw_depth_to_distance_cm(
-        upper_depth_raw, float_min, float_max, camera, zero_is_invalid=zero_is_invalid
-    )
-    lower_z_cm = raw_depth_to_distance_cm(
-        lower_depth_raw, float_min, float_max, camera, zero_is_invalid=zero_is_invalid
-    )
+    if depth is not None:
+        upper_z_cm = depth.distance_cm(upper_centroid[0], upper_centroid[1])
+        lower_z_cm = depth.distance_cm(lower_centroid[0], lower_centroid[1])
+    else:
+        upper_z_cm = raw_depth_to_distance_cm(
+            upper_depth_raw, float_min, float_max, camera, zero_is_invalid=zero_is_invalid
+        )
+        lower_z_cm = raw_depth_to_distance_cm(
+            lower_depth_raw, float_min, float_max, camera, zero_is_invalid=zero_is_invalid
+        )
 
-    if upper_z_cm is None or lower_z_cm is None:
-        return None
-
-    upper_mm = point_to_mm(
-        upper_centroid[0], upper_centroid[1], upper_z_cm, image_width, image_height, camera
+    return distance_3d_from_cm(
+        upper_centroid, lower_centroid, upper_z_cm, lower_z_cm, image_width, image_height, camera
     )
-    lower_mm = point_to_mm(
-        lower_centroid[0], lower_centroid[1], lower_z_cm, image_width, image_height, camera
-    )
-    if upper_mm is None or lower_mm is None:
-        return None
-    upper_x_mm, upper_y_mm = upper_mm
-    lower_x_mm, lower_y_mm = lower_mm
-
-    # Convert Z from cm to mm for consistent units
-    upper_z_mm = upper_z_cm * 10
-    lower_z_mm = lower_z_cm * 10
-
-    distance = vector_length_3d(
-        upper_x_mm, upper_y_mm, upper_z_mm,
-        lower_x_mm, lower_y_mm, lower_z_mm,
-    )
-
-    return distance, upper_z_cm, lower_z_cm
