@@ -78,11 +78,16 @@ Neck versus things beside it
 A hand, hair or other skin next to the neck widens the skin span. It is
 caught by (a) the depth stepping *nearer* walking out from the neck centre
 to an edge (:data:`MAX_OUTWARD_DEPTH_STEP_CM`), (b) the neck centre lying
-far from the FaceMesh jaw centre (:data:`MAX_OFFCENTRE_MM`; the jaw angles,
-not the chin, because the chin swings ~10 cm in front of the neck axis with
-every small head turn), and (c) a span of at least :data:`MAX_NECK_TO_JAW`
+far from the FaceMesh jaw centre in camera space (:data:`MAX_OFFCENTRE_MM`;
+the jaw angles, not the chin, because the chin swings ~10 cm in front of the
+neck axis with every small head turn), and (c) a span of at least :data:`MAX_NECK_TO_JAW`
 times the jaw width. A neck merely wider than the jaw (thick necks) or
-moderately off-centre is *measured* with low quality, not rejected. Every
+moderately off-centre is *measured* with low quality, not rejected.
+Residual risk: a narrow strip of skin (a finger, a hand edge) flush with one
+side of the neck and at the neck's depth has no depth step and shifts the
+neck centre by only half its width: up to ~10 mm wide it gives ok/good with
+a width a few % high (8 mm: +6 %), 12-24 mm gives ok/low ("off the jaw
+centre") with +9-18 %; only from ~24 mm is it rejected. Check the overlay. Every
 rejected row is counted by reason (``reject_counts``, warnings), and an
 ``edges-occluded`` message gives the advice for the dominant reason.
 
@@ -258,17 +263,25 @@ MAX_EDGE_BEHIND_CHIN_CM = 20.0
 MAX_EDGE_SLOPE = 0.35
 EDGE_SLOPE_BASELINE_MM = 2.0
 
-# Reference for "is the neck under the face": the mid-point of the FaceMesh
-# jaw landmarks (172/397; the chin landmark when they are missing). The jaw
-# angles sit only a few cm in front of the neck axis, so a small head turn
-# moves them far less than the chin (~10 cm in front): a 5 degree turn moves
-# the chin ~9 mm but the jaw mid-point ~3-4 mm. Validation photos: neck
-# centre 1.5-3 mm (IMG_2386/2389) and 6-7 mm (IMG_2363) from it.
-# Provisional heuristics: off-centre by more than LOW_QUALITY_OFFCENTRE_MM
-# lowers quality; by more than MAX_OFFCENTRE_MM (a head turned ~15 degrees,
-# or skin such as a hand widening one side by ~2 cm) rejects the row.
+# Reference for "is the neck under the face": the FaceMesh jaw centre
+# (172/397; the chin landmark when they are missing), compared with the neck
+# centre in camera space (mm): each jaw landmark back-projected at its own
+# depth (~38-42 cm), the neck centre from the two edges at their tangent
+# depths (~45 cm). (Comparing pixels instead makes a subject framed off the
+# optical axis by X read off-centre by ~X * (z_neck / z_jaw - 1), ~1 mm per
+# cm.) The jaw angles sit ~4-6 cm in front of the neck axis, so a head turn
+# of t degrees moves them ~5 cm * sin(t) (the chin, ~10 cm in front, twice
+# that). Validation photos (3-D): neck centre 1-2 mm (IMG_2386, assumed
+# intrinsics), 2-3 mm (IMG_2389) and 10.2-10.9 mm (IMG_2363, a mild turn:
+# jaw depths differ by 1.2 cm) from it.
+# Provisional heuristics: above LOW_QUALITY_OFFCENTRE_MM (a ~5 degree turn)
+# the result is low quality; above MAX_OFFCENTRE_MM (a ~8-14 degree turn,
+# or skin such as a hand widening one side by ~24 mm) the row is rejected.
+# IMG_2363 lands 1.1 mm under the limit: kept as ok/low (its other issue is
+# a collar close to the edge), rather than rejecting a same-person photo
+# for a mild turn.
 LOW_QUALITY_OFFCENTRE_MM = 5.0
-MAX_OFFCENTRE_MM = 10.0
+MAX_OFFCENTRE_MM = 12.0
 
 # A hand or other object against the side of the neck and nearer than it
 # shows up as the depth stepping *nearer* while walking from the neck centre
@@ -588,9 +601,45 @@ def _evaluate_edges(depth, camera, photo_size, left_xy, right_xy, z_ref_cm):
     )
 
 
-def _offcentre_mm(row: NeckWidthRow, reference_x: float, px_per_mm: float) -> float:
-    """Signed distance (mm) of the neck centre from the face reference."""
-    return (0.5 * (row.left_x + row.right_x) - reference_x) / px_per_mm
+def _lateral_mm(x_px: float, z_cm: float, camera) -> float:
+    """Camera-space lateral coordinate (mm) of photo column ``x_px`` at ``z_cm``."""
+    return (x_px - camera.cx) * z_cm * 10.0 / camera.fx
+
+
+def _face_reference_x_mm(landmarks, depth, camera, chin_x, z_chin_cm) -> float:
+    """Camera-space lateral position (mm) of the FaceMesh jaw centre.
+
+    Each jaw landmark (172/397) is back-projected at its own depth; a
+    landmark without depth, or whose depth is far behind the chin (the
+    contour landmark fell on the background), uses the chin depth. Without
+    jaw landmarks the chin itself is the reference.
+    """
+    if _jaw_width_px(landmarks) is None:
+        return _lateral_mm(chin_x, z_chin_cm, camera)
+    xs = []
+    for index in FACE_MESH_JAW_INDICES:
+        x, y = (float(v) for v in landmarks[index][:2])
+        z = depth.distance_cm(x, y, DEPTH_WINDOW_RADIUS)
+        if z is None or z > z_chin_cm + MAX_EDGE_BEHIND_CHIN_CM:
+            z = z_chin_cm
+        xs.append(_lateral_mm(x, z, camera))
+    return 0.5 * (xs[0] + xs[1])
+
+
+def _offcentre_mm(row: NeckWidthRow, context) -> float | None:
+    """Signed lateral distance (mm, camera space) of the neck centre -- the
+    mid-point of the two edges back-projected at their tangent depths -- from
+    the jaw centre (:func:`_face_reference_x_mm`). Comparing in 3-D keeps a
+    subject framed off the optical axis from reading as off-centre (jaw at
+    ~40 cm, neck edges at ~45 cm). None without edge depths."""
+    if row.left_depth_cm is None or row.right_depth_cm is None:
+        return None
+    camera = context["camera"]
+    centre = 0.5 * (
+        _lateral_mm(row.left_x, row.left_depth_cm, camera)
+        + _lateral_mm(row.right_x, row.right_depth_cm, camera)
+    )
+    return centre - context["face_x_mm"]
 
 
 def _outward_depth_step_cm(depth_cm, depth_obj, row: NeckWidthRow, inset_px: float) -> float:
@@ -641,13 +690,14 @@ def _apply_shape_checks(row: NeckWidthRow, edges_above, edges_below, baseline_px
                 else:
                     row.right_ok = False
     px_mm = context["px_per_mm"]
+    offcentre = _offcentre_mm(row, context)
     if row.right_x <= row.left_x:
         reject(REJECT_OFFCENTRE, "edges crossed")
-    elif abs(_offcentre_mm(row, context["reference_x"], px_mm)) > MAX_OFFCENTRE_MM:
+    elif offcentre is not None and abs(offcentre) > MAX_OFFCENTRE_MM:
         reject(
             REJECT_OFFCENTRE,
-            f"neck centre {abs(_offcentre_mm(row, context['reference_x'], px_mm)):.0f} mm "
-            "off the jaw centre (head turned, or skin such as a hand beside the neck?)",
+            f"neck centre {abs(offcentre):.0f} mm off the jaw centre "
+            "(head turned, or skin such as a hand beside the neck?)",
         )
     step = _outward_depth_step_cm(context["depth_cm"], context["depth"], row, EDGE_INSET_MM * px_mm)
     if step >= MAX_OUTWARD_DEPTH_STEP_CM:
@@ -849,11 +899,6 @@ def measure_neck_width(
         )
     roll_deg = math.degrees(math.atan2(chin_x - nose_x, chin_y - nose_y))
     jaw_width_px = _jaw_width_px(landmarks)
-    if jaw_width_px is not None:
-        jaw_l, jaw_r = (landmarks[i] for i in FACE_MESH_JAW_INDICES)
-        reference_x = 0.5 * (float(jaw_l[0]) + float(jaw_r[0]))
-    else:
-        reference_x = chin_x
 
     depth = portrait.depth.median_filtered(3)
     z_chin = depth.distance_cm(chin_x, chin_y, DEPTH_WINDOW_RADIUS)
@@ -861,6 +906,7 @@ def measure_neck_width(
         return NeckWidthResult(
             status=STATUS_NO_DEPTH, message="no depth at the chin", chin=(chin_x, chin_y)
         )
+    face_x_mm = _face_reference_x_mm(landmarks, depth, camera, chin_x, z_chin)
 
     warnings: list[str] = []
     bottom, band_source, neck_joint = _band_bottom(
@@ -888,7 +934,8 @@ def measure_neck_width(
     neck_px_mm = _px_per_mm(camera, z_chin + NECK_BEHIND_CHIN_CM)
     context = {
         "px_per_mm": neck_px_mm,
-        "reference_x": reference_x,
+        "face_x_mm": face_x_mm,
+        "camera": camera,
         "jaw_width_px": jaw_width_px,
         "depth": depth,
         "depth_cm": depth.to_cm_array(),
@@ -934,7 +981,7 @@ def measure_neck_width(
         for code, count in result.reject_counts.items():
             result.warnings.append(f"{REJECT_LABELS[code][0]} on {count} rows")
         result.message = (
-            f"{_advice(result.reject_counts, bool(stable), len(result.rows))} "
+            f"{_advice(result.reject_counts, bool(stable), result.rows)} "
             f"({len(result.rows)} rows with skin edges; clean, stable rows span "
             f"{support_mm:.1f} mm, {MIN_SUPPORT_MM:.0f} mm needed)"
         )
@@ -976,9 +1023,10 @@ def _count_rejections(rows) -> dict[str, int]:
     return dict(sorted(counts.items(), key=lambda item: -item[1]))
 
 
-def _advice(counts: dict[str, int], had_clean_rows: bool, n_rows: int) -> str:
+def _advice(counts: dict[str, int], had_clean_rows: bool, rows) -> str:
     """The status message for an ``edges-occluded`` result: the advice for
     the dominant rejection reason."""
+    n_rows = len(rows)
     if n_rows * ROW_STEP_MM < MIN_VISIBLE_NECK_MM:
         # Hardly any neck skin below the chin: the neck is not in view.
         return ADVICE_TOO_CLOSE
@@ -987,10 +1035,12 @@ def _advice(counts: dict[str, int], had_clean_rows: bool, n_rows: int) -> str:
     if not counts:
         return ADVICE_TOO_CLOSE
     # Something beside the neck overrides the collar advice when it is
-    # common: it is what the user can fix.
-    for code in (REJECT_DEPTH_STEP, REJECT_WIDE):
-        if counts.get(code, 0) * 2 >= n_rows:
-            return REJECT_LABELS[code][1]
+    # common: it is what the user can fix. A depth step counts only on rows
+    # where it is the sole reason (a collar V trips it on up to a third of
+    # its rows, always together with occluded/oblique edges).
+    sole_step = sum(1 for r in rows if set(r.reject_codes) == {REJECT_DEPTH_STEP})
+    if sole_step * 2 >= n_rows or counts.get(REJECT_WIDE, 0) * 2 >= n_rows:
+        return ADVICE_BESIDE
     return REJECT_LABELS[next(iter(counts))][1]
 
 
@@ -1013,9 +1063,7 @@ def _assess_quality(result: NeckWidthResult, stable, context):
         reasons.append(
             f"clean rows span only {result.support_mm:.1f} mm (< {GOOD_SUPPORT_MM:.0f} mm)"
         )
-    offcentre = max(
-        abs(_offcentre_mm(r, context["reference_x"], context["px_per_mm"])) for r in stable
-    )
+    offcentre = max(abs(_offcentre_mm(r, context)) for r in stable)
     if offcentre > LOW_QUALITY_OFFCENTRE_MM:
         reasons.append(
             f"neck centre {offcentre:.1f} mm off the jaw centre (head turned or asymmetric?)"

@@ -23,11 +23,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   nearer than inside by 0.5 cm = collar, rejected; 0.2-0.5 cm = "collar
   close to the neck edge", low quality) and gives each edge's depth 3 mm
   inside it. Rows with oblique edges (open-collar V), the depth stepping
-  nearer towards an edge or the neck centre more than 10 mm from the
-  FaceMesh jaw centre (a hand beside the neck, a turned head), a span of at
+  nearer towards an edge or the neck centre more than 12 mm from the
+  FaceMesh jaw centre, both back-projected to camera space (a hand beside
+  the neck, a turned head; framing off the optical axis does not matter), a span of at
   least 1.5x the jaw width, or left/right depths more than 4 cm apart are
-  rejected; a neck wider than 1.2x the jaw (thick neck) or 5-10 mm
-  off-centre is measured with low quality; the width is the median over the topmost run of clean, stable
+  rejected; a neck wider than 1.2x the jaw (thick neck) or 5-12 mm
+  off-centre is measured with low quality (a narrow skin strip flush with
+  the neck side is a documented residual risk); the width is the median over the topmost run of clean, stable
   rows spanning at least 2 mm (low quality below 5 mm), else
   `status="edges-occluded"`. Head or neck roll above 8 degrees warns. The
   band runs from the chin (FaceMesh 152) to Apple Vision's neck joint, or

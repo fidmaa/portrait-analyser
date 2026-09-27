@@ -267,8 +267,9 @@ def _mesh_turned(jaw_shift_px=0.0, chin_shift_px=0.0):
     return mesh
 
 
-def _neck_px_per_mm():
-    return FX / _inset_depth_mm()
+def _face_px_per_mm():
+    """Pixels per mm at the jaw landmarks (the synthetic face plane)."""
+    return FX / FACE_Z_MM
 
 
 @pytest.mark.parametrize("fraction", [0.05, 0.06, 0.07, 0.08])
@@ -285,7 +286,7 @@ def test_small_head_turn_still_measures(fraction):
 
 
 def test_moderate_jaw_offset_lowers_quality():
-    shift = 7.0 * _neck_px_per_mm()  # neck centre 7 mm from the jaw centre
+    shift = 7.0 * _face_px_per_mm()  # jaw centre 7 mm (3-D) from the neck centre
     result = measure_neck_width(
         make_portrait(), face_mesh=_mesh_turned(jaw_shift_px=shift), body_pose=body_pose()
     )
@@ -295,7 +296,7 @@ def test_moderate_jaw_offset_lowers_quality():
 
 
 def test_neck_far_off_the_jaw_centre_is_rejected_with_face_the_camera():
-    shift = 15.0 * _neck_px_per_mm()
+    shift = 15.0 * _face_px_per_mm()
     result = measure_neck_width(
         make_portrait(), face_mesh=_mesh_turned(jaw_shift_px=shift), body_pose=body_pose()
     )
@@ -536,8 +537,9 @@ def test_hand_next_to_the_neck_is_rejected_with_advice():
 
 
 def test_hand_at_the_neck_depth_is_caught_by_the_off_centre_check():
+    # 30 mm of skin flush with the neck side: centre ~15 mm off (> 12 mm).
     result = measure_neck_width(
-        _hand_portrait(nearer_mm=0.0), face_mesh=face_mesh(), body_pose=body_pose()
+        _hand_portrait(hand_mm=30.0, nearer_mm=0.0), face_mesh=face_mesh(), body_pose=body_pose()
     )
     assert result.status == STATUS_EDGES_OCCLUDED
     assert "off-centre" in result.reject_counts
@@ -788,3 +790,130 @@ def test_old_macos_without_body_pose_request_is_unavailable(monkeypatch):
     monkeypatch.setitem(sys.modules, "Quartz", type(sys)("Quartz"))
     with pytest.raises(AppleVisionUnavailable, match="VNDetectHumanBodyPoseRequest"):
         apple_vision._import_backend()
+
+
+# -- framing and head turn in 3-D (re-review #2) ----------------------------------
+
+JAW_HALF_MM = 55.0  # jaw landmarks either side of the neck axis
+
+
+def _rotate(x, z, x0, z0, yaw_deg):
+    t = math.radians(yaw_deg)
+    dx, dz = x - x0, z - z0
+    return x0 + dx * math.cos(t) - dz * math.sin(t), z0 + dx * math.sin(t) + dz * math.cos(t)
+
+
+def _ellipse_neck_depth(u, axis_x_mm, yaw_deg, a_mm, b_mm):
+    """Near-surface depth (mm) along photo columns ``u`` of an elliptic
+    cylinder (semi-axes a lateral, b front-back) centred at
+    (axis_x_mm, NECK_AXIS_Z_MM) and turned by ``yaw_deg``; NaN outside."""
+    x = (np.asarray(u, dtype=float) - CX) / FX
+    t = math.radians(yaw_deg)
+    c, s_ = math.cos(t), math.sin(t)
+    p, q = x * c + s_, axis_x_mm * c + NECK_AXIS_Z_MM * s_
+    r, s0 = -x * s_ + c, -axis_x_mm * s_ + NECK_AXIS_Z_MM * c
+    qa = p * p / a_mm**2 + r * r / b_mm**2
+    qb = -2 * (p * q / a_mm**2 + r * s0 / b_mm**2)
+    qc = q * q / a_mm**2 + s0 * s0 / b_mm**2 - 1
+    disc = qb * qb - 4 * qa * qc
+    with np.errstate(invalid="ignore"):
+        z = (-qb - np.sqrt(disc)) / (2 * qa)
+    return np.where(disc >= 0, z, np.nan)
+
+
+def make_scene(
+    *, axis_x_mm=0.0, yaw_deg=0.0, a_mm=NECK_RADIUS_MM, b_mm=NECK_RADIUS_MM, face_z_mm=FACE_Z_MM
+):
+    """Portrait + FaceMesh landmarks of a subject whose neck axis is
+    ``axis_x_mm`` off the optical axis and whose head/neck is turned by
+    ``yaw_deg`` about the neck axis (jaw landmarks and elliptic neck turn
+    together)."""
+    depth_w, depth_h = PHOTO_W // DEPTH_SCALE, PHOTO_H // DEPTH_SCALE
+    us = np.arange(depth_w) * (PHOTO_W - 1) / (depth_w - 1)
+    vs = np.arange(depth_h) * (PHOTO_H - 1) / (depth_h - 1)
+    depth = np.full((depth_h, depth_w), BACKGROUND_Z_MM)
+    below = vs >= CHIN_Y
+    neck_row = _ellipse_neck_depth(us, axis_x_mm, yaw_deg, a_mm, b_mm)
+    depth[below] = np.where(np.isfinite(neck_row), neck_row, BACKGROUND_Z_MM)
+    face_centre_px = CX + axis_x_mm * FX / face_z_mm
+    face_cols = np.abs(us - face_centre_px) <= 250
+    depth[np.ix_(~below, face_cols)] = face_z_mm
+
+    skin = np.zeros((PHOTO_H, PHOTO_W), dtype=np.uint8)
+    xs = np.arange(PHOTO_W)
+    on = np.isfinite(_ellipse_neck_depth(xs + 0.5, axis_x_mm, yaw_deg, a_mm, b_mm))
+    skin[int(CHIN_Y) :, on] = 255
+    skin[: int(CHIN_Y), np.abs(xs - face_centre_px) <= 250] = 255
+    portrait = IOSPortrait(
+        photo=Image.new("RGB", (PHOTO_W, PHOTO_H), (90, 90, 90)),
+        skinmap=Image.fromarray(skin, "L"),
+        depth_m=(depth / 1000.0).astype(np.float32),
+        depth_accuracy="absolute",
+        depth_plausible=True,
+        focal_length_px=(FX, FX),
+        principal_point_px=(CX, CY),
+    )
+
+    def project(x_mm, z_mm):
+        return CX + x_mm * FX / z_mm
+
+    landmarks = [(face_centre_px, CHIN_Y - 300.0)] * 478
+    chin_x, chin_z = _rotate(axis_x_mm, NECK_AXIS_Z_MM - 110.0, axis_x_mm, NECK_AXIS_Z_MM, yaw_deg)
+    landmarks[152] = (project(chin_x, chin_z), CHIN_Y)
+    landmarks[1] = (project(chin_x, chin_z), CHIN_Y - 300.0)
+    for index, side in ((172, -1), (397, 1)):
+        jx, jz = _rotate(
+            axis_x_mm + side * JAW_HALF_MM, face_z_mm, axis_x_mm, NECK_AXIS_Z_MM, yaw_deg
+        )
+        landmarks[index] = (project(jx, jz), CHIN_Y - 60.0)
+    return portrait, landmarks
+
+
+@pytest.mark.parametrize("axis_x_mm", [-80.0, 80.0])
+def test_verdict_does_not_depend_on_framing(axis_x_mm):
+    """A subject off the optical axis: the jaw (at the face plane, 40 cm) and
+    the neck (~45-51 cm) project with different scales. Compared in pixels
+    this read as ~16 mm off-centre (rejected); in 3-D it is centred."""
+    portrait0, mesh0 = make_scene()
+    centred = measure_neck_width(portrait0, face_mesh=mesh0, body_pose=body_pose())
+    portrait, mesh = make_scene(axis_x_mm=axis_x_mm)
+    shifted = measure_neck_width(portrait, face_mesh=mesh, body_pose=body_pose())
+    assert shifted.status == centred.status == STATUS_OK
+    assert shifted.quality == centred.quality == "good", shifted.quality_reasons
+    assert shifted.width_mm == pytest.approx(centred.width_mm, rel=0.02)
+    assert not any("off the jaw centre" in r for r in shifted.quality_reasons)
+
+
+@pytest.mark.parametrize("yaw_deg", [-5.0, 5.0])
+def test_small_real_head_turn_measures(yaw_deg):
+    """Head and (elliptic) neck turned 5 degrees together: the jaw landmarks
+    move ~5 mm and the neck edges get different depths; still measured."""
+    straight, mesh0 = make_scene(a_mm=67.0, b_mm=57.0, face_z_mm=460.0)
+    reference = measure_neck_width(straight, face_mesh=mesh0, body_pose=body_pose())
+    portrait, mesh = make_scene(yaw_deg=yaw_deg, a_mm=67.0, b_mm=57.0, face_z_mm=460.0)
+    result = measure_neck_width(portrait, face_mesh=mesh, body_pose=body_pose())
+    assert result.status == STATUS_OK, result.message
+    assert result.left_depth_cm != pytest.approx(result.right_depth_cm, abs=0.05)
+    assert result.width_mm == pytest.approx(reference.width_mm, rel=0.03)
+
+
+def test_large_head_turn_is_rejected_with_face_the_camera():
+    portrait, mesh = make_scene(yaw_deg=20.0, a_mm=67.0, b_mm=57.0, face_z_mm=460.0)
+    result = measure_neck_width(portrait, face_mesh=mesh, body_pose=body_pose())
+    assert result.status == STATUS_EDGES_OCCLUDED
+    assert "off-centre" in result.reject_counts
+    assert result.message.startswith(neck_width.ADVICE_TURNED)
+
+
+def test_depth_step_counts_for_hand_advice_only_as_the_sole_reason():
+    def row(codes):
+        r = neck_width.NeckWidthRow(0, 0, 1, 40, 40, 50, 50, 130.0, False, False)
+        r.reject_codes = list(codes)
+        return r
+
+    collar_v = [row(["occluded", "depth-step"])] * 6 + [row(["oblique"])] * 4
+    counts = neck_width._count_rejections(collar_v)
+    assert neck_width._advice(counts, False, collar_v) == neck_width.ADVICE_COLLAR
+    hand = [row(["depth-step"])] * 6 + [row(["oblique"])] * 4
+    counts = neck_width._count_rejections(hand)
+    assert neck_width._advice(counts, False, hand) == neck_width.ADVICE_BESIDE
