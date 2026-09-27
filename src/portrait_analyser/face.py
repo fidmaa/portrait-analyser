@@ -649,55 +649,175 @@ def find_neck_measurement_point(
     raise IndexError("No valid neck row found")
 
 
-def find_bounding_box_teeth(teethmap, margin_x=100, margin_y=100, min_value=200):
-    min_teeth_x = None
-    min_teeth_y = None
-    max_teeth_x = None
-    max_teeth_y = None
+# Apple's semantic teeth matte is a 0-255 confidence map whose overall gain
+# varies a lot between captures: on some photos the incisors saturate at 255,
+# on others the whole matte peaks at ~100-140 even though teeth are clearly
+# visible.  A fixed ``> 200`` cut therefore misses many real teeth.  The
+# adaptive threshold below scales with the matte's own peak, is capped at the
+# historical 200 (strong mattes behave exactly as before whenever their peak
+# is high enough) and never drops below a floor that sits above the faint
+# lip/mouth-contour halo Apple paints around an open mouth (~20-40) and above
+# faint "teeth-like" blobs seen on mattes without visible teeth (max ~59).
+TEETH_THRESHOLD_CAP = 200
+TEETH_THRESHOLD_FLOOR = 64
+TEETH_PEAK_FRACTION = 0.5
+# The matte "peak" is the value of the K-th brightest pixel, K being this
+# fraction of the image area (~1000 px on a 2320x3087 matte).  Using a rank
+# statistic instead of ``max`` keeps a handful of saturated noise pixels from
+# setting the threshold; using an area fraction instead of a percentile of
+# non-zero pixels keeps it independent of how large the faint halo is.
+TEETH_PEAK_AREA_FRACTION = 1.4e-4
 
-    for y in range(margin_y, teethmap.size[1] - margin_y):
-        for x in range(margin_x, teethmap.size[0] - margin_x):
-            if teethmap.getpixel((x, y)) > min_value:
-                if min_teeth_x is None or min_teeth_x > x:
-                    min_teeth_x = x
-                if max_teeth_x is None or max_teeth_x < x:
-                    max_teeth_x = x
+# Bounding-box sanity limits, as fractions of the matte size (the historical
+# fixed values were 100 px margins and a 200 px minimum height on ~2300x3100
+# mattes, which also rejected photos where only one arch is in the matte).
+TEETH_BBOX_MARGIN_FRACTION = 0.03
+TEETH_BBOX_MIN_HEIGHT_FRACTION = 0.002
+TEETH_BBOX_MIN_AREA_FRACTION = 1.5e-5
+# Connected components smaller than this fraction of the largest one are
+# treated as speckle and do not extend the bounding box.
+TEETH_BBOX_COMPONENT_FRACTION = 0.1
+# Inter-incisal measurement needs both arches inside the box.  A box shorter
+# than this fraction of the matte height (the historical 200 px on ~3100 px
+# mattes) holds a single arch, whose internal notches would otherwise be
+# mistaken for the gap between upper and lower incisors.
+TEETH_MEASUREMENT_MIN_HEIGHT_FRACTION = 0.065
 
-                if min_teeth_y is None or min_teeth_y > y:
-                    min_teeth_y = y
-                if max_teeth_y is None or max_teeth_y < y:
-                    max_teeth_y = y
 
-    if max_teeth_y == teethmap.size[1] - margin_y - 1:
-        # bottom not found!
-        return
+def _teeth_array(teethmap):
+    """Return the teeth matte as a 2-D numpy array (first channel if RGB)."""
+    arr = numpy.asarray(teethmap)
+    if arr.ndim > 2:
+        arr = arr[..., 0]
+    return arr
 
-    if min_teeth_x is None:
-        return
 
-    if max_teeth_y - min_teeth_y < 200:
-        return
+def teeth_threshold(
+    teethmap,
+    floor=None,
+    cap=None,
+    peak_fraction=None,
+    peak_area_fraction=None,
+) -> int:
+    """Return a per-matte confidence threshold for the Apple teeth matte.
 
-    return (
-        min_teeth_x,
-        min_teeth_y,
-        max_teeth_x - min_teeth_x,
-        max_teeth_y - min_teeth_y,
+    Pixels ``>= teeth_threshold(teethmap)`` are treated as teeth.  The value is
+    ``peak_fraction`` of the matte's robust peak (the K-th brightest pixel,
+    ``K = peak_area_fraction * width * height``), clipped to ``[floor, cap]``.
+    Arguments left as ``None`` take the ``TEETH_*`` module constants.
+    """
+    floor = TEETH_THRESHOLD_FLOOR if floor is None else floor
+    cap = TEETH_THRESHOLD_CAP if cap is None else cap
+    peak_fraction = TEETH_PEAK_FRACTION if peak_fraction is None else peak_fraction
+    if peak_area_fraction is None:
+        peak_area_fraction = TEETH_PEAK_AREA_FRACTION
+    if not 0 <= floor <= cap:
+        raise ValueError("floor must be non-negative and not above cap")
+    if not 0 < peak_fraction <= 1:
+        raise ValueError("peak_fraction must be in the (0, 1] range")
+    if not 0 < peak_area_fraction < 1:
+        raise ValueError("peak_area_fraction must be in the (0, 1) range")
+
+    flat = _teeth_array(teethmap).ravel()
+    if flat.size == 0:
+        return int(cap)
+    k = min(flat.size, max(1, round(flat.size * peak_area_fraction)))
+    peak = float(numpy.partition(flat, flat.size - k)[flat.size - k])
+    return round(min(cap, max(floor, peak * peak_fraction)))
+
+
+def _resolve_threshold(teethmap, threshold):
+    return teeth_threshold(teethmap) if threshold is None else threshold
+
+
+def _margin(value, size):
+    if value is None:
+        return round(size * TEETH_BBOX_MARGIN_FRACTION)
+    return int(value)
+
+
+def find_bounding_box_teeth(
+    teethmap,
+    margin_x=None,
+    margin_y=None,
+    min_value=None,
+    min_height=None,
+    min_area=None,
+):
+    """Return the teeth bounding box ``(x, y, width, height)`` or ``None``.
+
+    ``min_value=None`` (default) uses :func:`teeth_threshold` and treats pixels
+    ``>= threshold`` as teeth; an explicit ``min_value`` keeps the historical
+    strict ``> min_value`` comparison.  Margins default to
+    ``TEETH_BBOX_MARGIN_FRACTION`` of the matte size.  Only connected
+    components at least ``TEETH_BBOX_COMPONENT_FRACTION`` of the largest one
+    contribute to the box, so isolated speckles cannot inflate it.  ``None``
+    is returned when nothing is found, the teeth touch the bottom margin, the
+    box is shorter than ``min_height`` or the teeth cover fewer than
+    ``min_area`` pixels (both default to fractions of the matte size).
+    """
+    arr = _teeth_array(teethmap)
+    height, width = arr.shape
+    mx = _margin(margin_x, width)
+    my = _margin(margin_y, height)
+    if min_height is None:
+        min_height = max(1, round(height * TEETH_BBOX_MIN_HEIGHT_FRACTION))
+    if min_area is None:
+        min_area = max(1, round(height * width * TEETH_BBOX_MIN_AREA_FRACTION))
+
+    if min_value is None:
+        mask = arr >= teeth_threshold(arr)
+    else:
+        mask = arr > min_value
+
+    roi = numpy.zeros_like(mask)
+    roi[my : height - my, mx : width - mx] = True
+    mask &= roi
+    if not mask.any():
+        return None
+
+    import cv2
+
+    _, _, stats, _ = cv2.connectedComponentsWithStats(
+        mask.astype(numpy.uint8), connectivity=8
     )
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    keep_labels = numpy.flatnonzero(
+        areas >= TEETH_BBOX_COMPONENT_FRACTION * areas.max()
+    ) + 1
+    kept = stats[keep_labels]
+    if int(kept[:, cv2.CC_STAT_AREA].sum()) < min_area:
+        return None
+
+    x0 = int(kept[:, cv2.CC_STAT_LEFT].min())
+    y0 = int(kept[:, cv2.CC_STAT_TOP].min())
+    x1 = int((kept[:, cv2.CC_STAT_LEFT] + kept[:, cv2.CC_STAT_WIDTH]).max()) - 1
+    y1 = int((kept[:, cv2.CC_STAT_TOP] + kept[:, cv2.CC_STAT_HEIGHT]).max()) - 1
+
+    if y1 == height - my - 1:
+        # Teeth reach the bottom margin: the matte is cut off, reject.
+        return None
+
+    if y1 - y0 < min_height:
+        return None
+
+    return (x0, y0, x1 - x0, y1 - y0)
 
 
 def find_incisor_distance_teeth(
-    teethmap, bounding_box_teeth, threshold=200, margin_x=0.5
+    teethmap, bounding_box_teeth, threshold=None, margin_x=0.5
 ):
     """Find incisor distance from teeth map.
 
     Iterate from teethmap x1 to x1 + width, starting from
     the half of it, try finding points with MAXIMAL distance
     as long as they are within bounding_box_teeth and their
-    value is above 200 (well-detected teeth, to avoid
+    value is at least ``threshold`` (well-detected teeth, to avoid
     diasthemes which would probably be the highest distance
     points, but that's not what we're looking for...).
+    ``threshold=None`` uses the adaptive :func:`teeth_threshold`.
     """
+    threshold = _resolve_threshold(teethmap, threshold)
 
     y_mid = bounding_box_teeth[1] + bounding_box_teeth[3] / 2
     min_he = bounding_box_teeth[1]
@@ -908,7 +1028,7 @@ def _edge_pair_for_side(
 def find_incisor_centroids(
     teethmap,
     bounding_box_teeth,
-    threshold=200,
+    threshold=None,
     margin_x=0.5,
     min_pixels=50,
     centroid_margin_x=0.5,
@@ -926,7 +1046,8 @@ def find_incisor_centroids(
 
     Returns ``((upper_x, upper_y), (lower_x, lower_y))`` in teethmap
     coordinates, or ``None`` when two separated, sufficiently supported
-    incisal surfaces cannot be identified.
+    incisal surfaces cannot be identified.  ``threshold=None`` uses the
+    adaptive :func:`teeth_threshold`.
     """
     if not 0 < margin_x <= 1 or not 0 < centroid_margin_x <= 1:
         raise ValueError("margin fractions must be in the (0, 1] range")
@@ -948,9 +1069,8 @@ def find_incisor_centroids(
     if bb_w < 2 or bb_h < 2:
         return None
 
-    arr = numpy.array(teethmap)
-    if arr.ndim > 2:
-        arr = arr[..., 0]
+    arr = _teeth_array(teethmap)
+    threshold = _resolve_threshold(arr, threshold)
 
     # Locate a real low-confidence band between upper and lower teeth using a
     # central strip.  This replaces the old unconditional split at bbox/2.
@@ -1010,7 +1130,7 @@ def sample_depth_at_point(
     photo_height,
     kernel_size=3,
     support_mask=None,
-    support_threshold=200,
+    support_threshold=None,
     inward_y=0,
 ) -> int | None:
     """Sample depth map at a photo-space coordinate using median filtering.
@@ -1020,6 +1140,7 @@ def sample_depth_at_point(
     pixels whose centres map to foreground mask pixels are included.  An
     ``inward_y`` offset in depth pixels can move an incisal-edge sample into the
     tooth surface (negative for an upper tooth, positive for a lower tooth).
+    ``support_threshold=None`` uses :func:`teeth_threshold` of the mask.
     """
     if kernel_size < 1 or kernel_size % 2 == 0:
         raise ValueError("kernel_size must be a positive odd number")
@@ -1041,6 +1162,9 @@ def sample_depth_at_point(
         else round(point_y * (depthmap.height - 1) / (photo_height - 1))
     )
     depth_y += int(inward_y)
+
+    if support_mask is not None and support_threshold is None:
+        support_threshold = teeth_threshold(support_mask)
 
     half = kernel_size // 2
     values = []

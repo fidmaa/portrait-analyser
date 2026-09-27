@@ -8,11 +8,13 @@ from PIL import Image, ImageDraw
 from . import const
 from .exceptions import ExifValidationFailed, NoDepthMapFound, UnknownExtension
 from .face import (
+    TEETH_MEASUREMENT_MIN_HEIGHT_FRACTION,
     find_bounding_box_teeth,
     find_incisor_centroids,
     find_incisor_distance_teeth,
     IncisorMeasurement,
     sample_depth_at_point,
+    teeth_threshold,
 )
 from .incisor import compute_incisor_distance_3d
 
@@ -31,6 +33,7 @@ class IOSPortrait:
         incisor_distance=None,
         incisor_distance_3d_mm=None,
         incisor_measurement=None,
+        teeth_threshold=None,
     ):
         self.photo = photo
         self.depthmap = depthmap
@@ -41,6 +44,9 @@ class IOSPortrait:
         self.incisor_distance = incisor_distance
         self.incisor_distance_3d_mm = incisor_distance_3d_mm
         self.incisor_measurement = incisor_measurement
+        # Adaptive teeth-matte confidence threshold used for the detection
+        # (pixels >= this value were treated as teeth), or None without matte.
+        self.teeth_threshold = teeth_threshold
         self.floatValueMin = float(floatValueMin) if floatValueMin is not None else None
         self.floatValueMax = float(floatValueMax) if floatValueMax is not None else None
 
@@ -165,6 +171,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
     incisor_distance = None
     incisor_distance_3d_mm = None
     incisor_measurement = None
+    teeth_cutoff = None
     if teeth_image is not None:
         teeth_image = teeth_image.resize(picture_image.size)
 
@@ -178,9 +185,17 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         draw.rectangle([0, 0, border - 1, th - 1], fill=0)          # left
         draw.rectangle([tw - border, 0, tw - 1, th - 1], fill=0)    # right
 
-        teeth_bbox = find_bounding_box_teeth(teeth_image)
-        if teeth_bbox is not None:
-            incisor_distance = find_incisor_distance_teeth(teeth_image, teeth_bbox)
+        # One per-matte threshold for every teeth step (bbox, legacy distance,
+        # incisal edges and depth support), adapted to the matte's gain.
+        teeth_cutoff = teeth_threshold(teeth_image)
+        # The matte is integer-valued, so ``> cutoff - 1`` is ``>= cutoff``.
+        teeth_bbox = find_bounding_box_teeth(teeth_image, min_value=teeth_cutoff - 1)
+        if teeth_bbox is not None and teeth_bbox[3] >= round(
+            teeth_image.size[1] * TEETH_MEASUREMENT_MIN_HEIGHT_FRACTION
+        ):
+            incisor_distance = find_incisor_distance_teeth(
+                teeth_image, teeth_bbox, threshold=teeth_cutoff
+            )
 
             # 3D distance for legacy edge-of-gap points
             if (
@@ -199,6 +214,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                     photo_w,
                     photo_h,
                     support_mask=teeth_image,
+                    support_threshold=teeth_cutoff,
                     inward_y=-1,
                 )
                 ld_lower = sample_depth_at_point(
@@ -208,6 +224,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                     photo_w,
                     photo_h,
                     support_mask=teeth_image,
+                    support_threshold=teeth_cutoff,
                     inward_y=1,
                 )
                 if ld_upper is not None and ld_lower is not None:
@@ -225,7 +242,9 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                         incisor_distance_3d_mm = legacy_3d[0]
 
             # Centroid-based measurement with depth integration
-            centroids = find_incisor_centroids(teeth_image, teeth_bbox)
+            centroids = find_incisor_centroids(
+                teeth_image, teeth_bbox, threshold=teeth_cutoff
+            )
             if centroids is not None:
                 upper_c, lower_c = centroids
                 pixel_dist_y = abs(lower_c[1] - upper_c[1])
@@ -245,6 +264,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                         photo_w,
                         photo_h,
                         support_mask=teeth_image,
+                    support_threshold=teeth_cutoff,
                         inward_y=-1,
                     )
                     lower_depth_raw = sample_depth_at_point(
@@ -254,6 +274,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                         photo_w,
                         photo_h,
                         support_mask=teeth_image,
+                    support_threshold=teeth_cutoff,
                         inward_y=1,
                     )
 
@@ -309,6 +330,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         incisor_distance=incisor_distance,
         incisor_distance_3d_mm=incisor_distance_3d_mm,
         incisor_measurement=incisor_measurement,
+        teeth_threshold=teeth_cutoff,
     )
 
 

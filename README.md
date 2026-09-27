@@ -96,6 +96,7 @@ Attributes:
 - `teethmap` -- teeth segmentation mask (PIL Image or `None`)
 - `skinmap` -- skin segmentation mask (PIL Image or `None`)
 - `teeth_bbox` -- bounding box `(x, y, width, height)` of detected teeth, or `None`
+- `teeth_threshold` -- adaptive teeth-matte confidence cut used for this photo (pixels `>=` it count as teeth), or `None` without a teeth matte
 - `incisor_distance` -- incisor measurement as `(x, y1, x, y2)`, or `None`
 - `floatValueMin`, `floatValueMax` -- depth map float range from Apple metadata
 
@@ -123,10 +124,11 @@ Both extend `Rectangle` (attributes: `x`, `y`, `width`, `height`, `center_x`, `c
 ### Teeth & incisor utility functions
 
 - `find_neck_measurement_point(skinmap, face_location, threshold=200)` -- finds the narrowest horizontal line below the face in the skin map. Returns `(x1, y1, x2, y2)`.
-- `find_bounding_box_teeth(teethmap, margin_x=100, margin_y=100, min_value=200)` -- finds the bounding box of teeth in the teeth map. Returns `(x, y, width, height)` or `None`.
-- `find_incisor_distance_teeth(teethmap, bounding_box_teeth, threshold=200, margin_x=0.5)` -- measures the vertical pixel distance between upper and lower incisors. Returns `(x, y1, x, y2)` or `None`.
-- `find_incisor_centroids(teethmap, bounding_box_teeth, threshold=200, margin_x=0.5, min_pixels=50, centroid_margin_x=0.5, ...)` -- finds robust representative points on the facing upper and lower incisal edges. The historical function/field names still use “centroid”, but returned points are snapped to real paired teeth-mask pixels so they measure the inter-incisal gap and provide valid locations for depth sampling. Returns `((upper_x, upper_y), (lower_x, lower_y))` in teethmap coordinates, or `None`.
-- `sample_depth_at_point(depthmap, point_x, point_y, photo_width, photo_height, kernel_size=3, support_mask=None, support_threshold=200, inward_y=0) -> int | None` -- samples the depth map at a photo-space coordinate using median filtering over a `kernel_size x kernel_size` region. An optional foreground mask restricts sampling to the intended surface; `inward_y` moves an edge sample inward in native depth-map pixels.
+- `teeth_threshold(teethmap, floor=None, cap=None, peak_fraction=None, peak_area_fraction=None) -> int` -- per-matte teeth confidence threshold: half of the matte's robust peak (the K-th brightest pixel, K ≈ 0.014 % of the image area), clipped to `[64, 200]`. Apple's teeth matte gain varies a lot between captures (some peak at ~100–140 with clearly visible teeth), so a fixed cut misses weak mattes. All `threshold`/`min_value`/`support_threshold` arguments below default to `None`, meaning this adaptive value; passing a number keeps the historical fixed-cut behaviour.
+- `find_bounding_box_teeth(teethmap, margin_x=None, margin_y=None, min_value=None, min_height=None, min_area=None)` -- finds the bounding box of teeth in the teeth map. Margins, minimum height and minimum teeth area default to fractions of the matte size; connected components smaller than 10 % of the largest one (speckle) are ignored. An explicit `min_value` keeps the historical strict `> min_value` comparison. Returns `(x, y, width, height)` or `None`.
+- `find_incisor_distance_teeth(teethmap, bounding_box_teeth, threshold=None, margin_x=0.5)` -- measures the vertical pixel distance between upper and lower incisors. Returns `(x, y1, x, y2)` or `None`.
+- `find_incisor_centroids(teethmap, bounding_box_teeth, threshold=None, margin_x=0.5, min_pixels=50, centroid_margin_x=0.5, ...)` -- finds robust representative points on the facing upper and lower incisal edges. The historical function/field names still use “centroid”, but returned points are snapped to real paired teeth-mask pixels so they measure the inter-incisal gap and provide valid locations for depth sampling. Returns `((upper_x, upper_y), (lower_x, lower_y))` in teethmap coordinates, or `None`.
+- `sample_depth_at_point(depthmap, point_x, point_y, photo_width, photo_height, kernel_size=3, support_mask=None, support_threshold=None, inward_y=0) -> int | None` -- samples the depth map at a photo-space coordinate using median filtering over a `kernel_size x kernel_size` region. An optional foreground mask restricts sampling to the intended surface; `inward_y` moves an edge sample inward in native depth-map pixels.
 
 ### 3D depth conversion (`incisor` module)
 

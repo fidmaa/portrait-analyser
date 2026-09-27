@@ -17,9 +17,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   lower incisors have covered the upper lip vermilion. `--json` for batching.
 - `detect_face_mesh()` in `pose`, exposing the 478 Face Mesh landmarks without
   also running Pose estimation (which needs shoulders in frame).
+- `teeth_threshold()`: adaptive per-matte confidence threshold for Apple's
+  semantic teeth matte (half of the matte's robust peak, clipped to
+  `[64, 200]`), and `IOSPortrait.teeth_threshold` recording the value used.
 
 ### Changed
 
+- Teeth detection now works on weak teeth mattes. `load_image()` uses one
+  adaptive threshold for the teeth bounding box, the legacy incisor distance,
+  the incisal-edge points and the depth support mask instead of a fixed
+  `> 200`, which missed teeth on many real captures whose whole matte peaks
+  at ~100-220. `find_bounding_box_teeth`, `find_incisor_distance_teeth`,
+  `find_incisor_centroids` and `sample_depth_at_point` default their
+  threshold to `None` (adaptive); explicit numeric thresholds behave as before.
+- `find_bounding_box_teeth` is vectorised, ignores speckle components and uses
+  margins / minimum height / minimum area relative to the matte size instead
+  of fixed 100 px margins and a 200 px minimum height, so a single visible arch
+  now yields a bounding box. `load_image()` only runs the incisor measurements
+  when the box is at least 6.5 % of the matte height (the old 200 px), so a
+  single arch is never measured as a mouth opening.
 - `pose` diagnostic chatter ("Mouth open ratio") now goes to stderr instead of
   stdout, so it cannot corrupt a caller's machine-readable output.
 

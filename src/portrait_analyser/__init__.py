@@ -25,6 +25,7 @@ from .face import (
     find_neck_measurement_point,
     find_neck_narrowest_row,
     get_face_parameters,
+    teeth_threshold,
 )
 from .incisor import (
     compute_incisor_distance_3d,
@@ -99,6 +100,7 @@ __all__ = [
     "find_bounding_box_teeth",
     "find_incisor_centroids",
     "find_incisor_distance_teeth",
+    "teeth_threshold",
     "find_neck_measurement_point",
     "find_neck_narrowest_row",
     "find_stable_depth_x_from_edge",
