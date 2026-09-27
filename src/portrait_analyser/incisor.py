@@ -10,6 +10,8 @@ source data and methodology.
 
 import math
 
+from .camera import camera_axis
+
 # Range over which the calibration polynomial below is trustworthy. It was
 # fitted to measurements taken between roughly 20 and 70 cm; outside that
 # span a 5th-degree fit has nothing to hold it down. It peaks and turns over
@@ -39,17 +41,29 @@ def depth_raw_to_distance_cm(value, float_min, float_max):
     return 100.0 / disparity
 
 
-def pixels_per_mm_at_distance(distance_cm):
+def pixels_per_mm_at_distance(distance_cm, *, focal_px=None):
     """How many pixels in the original image correspond to 1mm at a given distance.
 
-    Calibration polynomial fitted to TrueDepth camera data.
-    Constants from own calibration data and curve fitted by MyCurveFit.com.
+    Without ``focal_px``: calibration polynomial fitted to TrueDepth camera
+    data (constants from own calibration data, curve fitted by
+    MyCurveFit.com), only trusted between MIN_CALIBRATED_DISTANCE_CM and
+    MAX_CALIBRATED_DISTANCE_CM.
+
+    With ``focal_px`` (a file's own focal length in photo pixels, see
+    :class:`portrait_analyser.camera.CameraModel`): the pinhole model
+    ``focal_px / distance_mm``, with no calibrated-range limit.
 
     :param distance_cm: distance from camera in centimeters
+    :param focal_px: optional focal length in pixels (keyword-only)
     :returns: pixels per millimeter at the given distance, or None when the
-        distance falls outside the calibrated range (see
-        MIN_CALIBRATED_DISTANCE_CM / MAX_CALIBRATED_DISTANCE_CM)
+        distance falls outside the calibrated range (polynomial) or is not
+        positive (pinhole)
     """
+    if focal_px is not None:
+        if distance_cm is None or distance_cm <= 0:
+            return None
+        return focal_px / (distance_cm * 10.0)
+
     if not MIN_CALIBRATED_DISTANCE_CM <= distance_cm <= MAX_CALIBRATED_DISTANCE_CM:
         return None
 
@@ -64,30 +78,63 @@ def pixels_per_mm_at_distance(distance_cm):
     )
 
 
-def pixel_to_mm(pixel_coord, distance_cm, image_dimension):
+def pixel_to_mm(pixel_coord, distance_cm, image_dimension, *, focal_px=None, principal_px=None):
     """Convert a pixel coordinate to physical millimeters at a given distance.
 
     The pinhole camera model requires coordinates measured from the optical
-    axis (the principal point, approximated here as the image centre), not
-    from the top-left corner. Without this correction, points at different
-    depths pick up a phantom lateral displacement proportional to their
-    distance from the image centre and the depth difference between them.
+    axis (the principal point), not from the top-left corner. Without this
+    correction, points at different depths pick up a phantom lateral
+    displacement proportional to their distance from the image centre and
+    the depth difference between them.
 
-    The pixel coordinate must be in original (full-resolution) image space,
-    matching the calibration polynomial's expected resolution (~2300x3000).
+    Legacy mode (``focal_px=None``): the calibration polynomial, with the
+    principal point approximated as the image centre. The pixel coordinate
+    must be in original (full-resolution) image space, matching the
+    polynomial's expected resolution (~2300x3000).
+
+    Camera mode (``focal_px`` given): ``(pixel - principal) * distance_mm /
+    focal_px``, with ``principal_px`` defaulting to ``image_dimension / 2``.
+    Both must be in the same pixel space as ``pixel_coord`` (the upright
+    photo returned by ``load_image``).
 
     :param pixel_coord: coordinate in pixels (original image space, from top-left)
     :param distance_cm: distance from camera in centimeters
     :param image_dimension: full image width (for an x coordinate) or height
         (for a y coordinate) in pixels, used to locate the principal point
+        when none is given
+    :param focal_px: optional focal length for this axis, pixels
+    :param principal_px: optional principal point for this axis, pixels
     :returns: physical distance in millimeters relative to the optical axis,
-        or None if the distance is outside the calibrated range
+        or None if the distance is outside the calibrated range (legacy) or
+        None / not positive
     """
+    if focal_px is not None:
+        if distance_cm is None or distance_cm <= 0:
+            return None
+        principal = image_dimension / 2.0 if principal_px is None else principal_px
+        return (pixel_coord - principal) * distance_cm * 10.0 / focal_px
+
     ppmm = pixels_per_mm_at_distance(distance_cm)
     if ppmm is None or ppmm <= 0:
         return None
     centred_coord = pixel_coord - image_dimension / 2.0
     return centred_coord / ppmm
+
+
+def point_to_mm(x, y, distance_cm, image_width, image_height, camera=None):
+    """Convert a photo-space point at ``distance_cm`` to ``(x_mm, y_mm)``.
+
+    Thin wrapper over :func:`pixel_to_mm` for both axes; ``camera`` is an
+    optional :class:`portrait_analyser.camera.CameraModel` (``None`` = legacy
+    polynomial). Returns ``None`` when either axis cannot be converted.
+    """
+    focal_x, principal_x = camera_axis(camera, "x")
+    focal_y, principal_y = camera_axis(camera, "y")
+    x_mm = pixel_to_mm(x, distance_cm, image_width, focal_px=focal_x, principal_px=principal_x)
+    y_mm = pixel_to_mm(y, distance_cm, image_height, focal_px=focal_y, principal_px=principal_y)
+    if x_mm is None or y_mm is None:
+        return None
+    return x_mm, y_mm
 
 
 def vector_length_3d(x1, y1, z1, x2, y2, z2):
@@ -104,6 +151,8 @@ def compute_incisor_distance_3d(
     float_max,
     image_width,
     image_height,
+    *,
+    camera=None,
 ):
     """Compute 3D Euclidean distance between upper and lower incisor centroids.
 
@@ -118,6 +167,8 @@ def compute_incisor_distance_3d(
     :param float_max: EXIF FloatMaxValue
     :param image_width: full photo width in pixels (principal point reference)
     :param image_height: full photo height in pixels (principal point reference)
+    :param camera: optional :class:`portrait_analyser.camera.CameraModel`;
+        ``None`` keeps the legacy calibration polynomial
     :returns: (distance_3d_mm, upper_distance_cm, lower_distance_cm) or None
     """
     upper_z_cm = depth_raw_to_distance_cm(upper_depth_raw, float_min, float_max)
@@ -126,13 +177,16 @@ def compute_incisor_distance_3d(
     if upper_z_cm is None or lower_z_cm is None:
         return None
 
-    upper_x_mm = pixel_to_mm(upper_centroid[0], upper_z_cm, image_width)
-    upper_y_mm = pixel_to_mm(upper_centroid[1], upper_z_cm, image_height)
-    lower_x_mm = pixel_to_mm(lower_centroid[0], lower_z_cm, image_width)
-    lower_y_mm = pixel_to_mm(lower_centroid[1], lower_z_cm, image_height)
-
-    if any(v is None for v in (upper_x_mm, upper_y_mm, lower_x_mm, lower_y_mm)):
+    upper_mm = point_to_mm(
+        upper_centroid[0], upper_centroid[1], upper_z_cm, image_width, image_height, camera
+    )
+    lower_mm = point_to_mm(
+        lower_centroid[0], lower_centroid[1], lower_z_cm, image_width, image_height, camera
+    )
+    if upper_mm is None or lower_mm is None:
         return None
+    upper_x_mm, upper_y_mm = upper_mm
+    lower_x_mm, lower_y_mm = lower_mm
 
     # Convert Z from cm to mm for consistent units
     upper_z_mm = upper_z_cm * 10

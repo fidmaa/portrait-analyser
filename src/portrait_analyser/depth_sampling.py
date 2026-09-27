@@ -16,7 +16,7 @@ import math
 
 from PIL import ImageFilter
 
-from .incisor import depth_raw_to_distance_cm, pixel_to_mm, vector_length_3d
+from .incisor import depth_raw_to_distance_cm, point_to_mm, vector_length_3d
 
 
 def median_filter_depthmap(depthmap, size=3):
@@ -115,6 +115,8 @@ def measure_filtered_surface_length(
     photo_height,
     float_min,
     float_max,
+    *,
+    camera=None,
 ):
     """Sum 3D Euclidean distance across consecutive photo-space points,
     reading depth from a pre-filtered map via bilinear sampling.
@@ -127,6 +129,8 @@ def measure_filtered_surface_length(
     :param photo_height: full photo height in pixels
     :param float_min: EXIF FloatMinValue
     :param float_max: EXIF FloatMaxValue
+    :param camera: optional :class:`portrait_analyser.camera.CameraModel`;
+        ``None`` keeps the legacy calibration polynomial
     :returns: total length in millimeters, or None if fewer than 2 points
         were given, or any point falls on invalid depth, or any point lies
         outside the calibration polynomial's trustworthy distance range
@@ -143,15 +147,14 @@ def measure_filtered_surface_length(
         if z_cm is None:
             return None
 
-        x_mm = pixel_to_mm(x, z_cm, photo_width)
-        y_mm = pixel_to_mm(y, z_cm, photo_height)
-        if x_mm is None or y_mm is None:
+        point_mm = point_to_mm(x, y, z_cm, photo_width, photo_height, camera)
+        if point_mm is None:
             # Beyond the calibrated range the conversion is meaningless; a
             # partial walk would silently report a shorter surface, so fail
             # the whole measurement instead.
             return None
 
-        points_3d.append((x_mm, y_mm, z_cm * 10.0))
+        points_3d.append((point_mm[0], point_mm[1], z_cm * 10.0))
 
     if len(points_3d) < 2:
         return None

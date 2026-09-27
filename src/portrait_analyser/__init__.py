@@ -1,4 +1,15 @@
-from .apple_depth import AppleDepthData, read_apple_depth
+from .apple_depth import (
+    DISPARITY_FAR_CAP_M,
+    AppleDepthData,
+    encode_depth_as_disparity_8bit,
+    read_apple_depth,
+)
+from .camera import (
+    CameraModel,
+    intrinsics_in_photo_space,
+    map_point_by_exif_orientation,
+    rotate_by_exif_orientation,
+)
 from .depth_sampling import (
     bilinear_sample,
     measure_filtered_surface_length,
@@ -36,6 +47,8 @@ from .incisor import (
     compute_incisor_distance_3d,
     depth_raw_to_distance_cm,
     pixel_to_mm,
+    pixels_per_mm_at_distance,
+    point_to_mm,
     vector_length_3d,
 )
 from .ios import IOSPortrait, load_image
@@ -72,6 +85,14 @@ __all__ = [
     "AppleDepthDecodeError",
     "AppleDepthUnavailable",
     "read_apple_depth",
+    "DISPARITY_FAR_CAP_M",
+    "encode_depth_as_disparity_8bit",
+    "CameraModel",
+    "intrinsics_in_photo_space",
+    "map_point_by_exif_orientation",
+    "rotate_by_exif_orientation",
+    "pixels_per_mm_at_distance",
+    "point_to_mm",
     "ExifValidationFailed",
     "Eye",
     "Face",

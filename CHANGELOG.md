@@ -20,10 +20,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `AppleDepthDecodeError` on a genuine decode failure. Adds
   `pyobjc-framework-Quartz` / `pyobjc-framework-AVFoundation` as
   `sys_platform == 'darwin'` dependencies, matching the existing
-  `pyheif-iplweb` convention. `load_image()`'s own pyheif-based path is
-  unchanged; a later task will use `read_apple_depth()` as a fallback there
-  and add the depth-map rotation `AppleDepthData.exif_orientation` calls
-  for (the map is returned in sensor orientation, undocumented until then).
+  `pyheif-iplweb` convention. The map is returned in sensor orientation;
+  `AppleDepthData.exif_orientation` is the rotation that lines it up with
+  the (already upright) photo.
+- `load_image()` reads photos from the TrueDepth capture app (absolute
+  depth stored as 16-bit disparity, which pyheif rejects with "Unsupported
+  JPEG data precision 16"): on any pyheif error decoding the depth image it
+  falls back to `read_apple_depth()` (macOS), rotates the depth map by the
+  EXIF orientation (never the photo/mattes, which are stored upright) and
+  re-encodes it as the familiar 8-bit `L` disparity `depthmap` with
+  `floatValueMax = 1/Z_near` and `floatValueMin = 1/Z_far`, `Z_far =
+  min(farthest valid depth, DISPARITY_FAR_CAP_M = 3 m)`; farther/invalid
+  pixels encode as 0. Quantisation: one code step is ~1.1-1.3 mm of depth at
+  30 cm and ~3-3.6 mm at 50 cm (round-trip error at most half a step). New
+  `encode_depth_as_disparity_8bit()` does the encoding. Without macOS the
+  load fails with `NoDepthMapFound` chained to the reason.
+- New `IOSPortrait` attributes (all `None` when unknown): `depth_m`
+  (full-precision upright depth in metres, NaN = invalid; capture-app files
+  only), `depth_accuracy` (`"absolute"`/`"relative"`, also filled for
+  Camera-app files on macOS -- iPhone 17 Pro Camera-app depth is
+  `"relative"` and runs 7-28 % short), `depth_filtered`, `focal_length_px`
+  `(fx, fy)` and `principal_point_px` `(cx, cy)` in upright-photo pixels
+  (capture-app files only), and the `camera` property.
+- `camera` module: `CameraModel(fx, fy, cx, cy)` (frozen dataclass,
+  `CameraModel.from_portrait()`), `rotate_by_exif_orientation()`,
+  `map_point_by_exif_orientation()` and `intrinsics_in_photo_space()`
+  (maps AVCameraCalibrationData intrinsics through the depth rotation into
+  photo pixels).
+- Pinhole metric conversion from file intrinsics: `pixel_to_mm(...,
+  *, focal_px=None, principal_px=None)` and
+  `pixels_per_mm_at_distance(..., *, focal_px=None)` use
+  `(pixel - principal) * Z_mm / focal_px` when `focal_px` is given (no
+  15-80 cm range limit), and `point_to_mm()` converts both axes from a
+  `CameraModel`. `compute_incisor_distance_3d`, `compute_tmd_3d`,
+  `measure_filtered_surface_length`, `compute_neck_circumference`,
+  `compute_neck_width_3d`, `detect_neck_midpoint_from_dual_mask` and
+  `compute_mouth_measurement_from_facemesh` take a keyword-only
+  `camera=None`. `load_image()` passes the file's camera for its own incisor
+  measurements on capture-app files. `pixels_per_mm_at_distance` is now
+  exported from the package root.
+
+### Changed
+
+- Semantic mattes whose row padding does not fit the historical Camera-app
+  layout (capture-app files) are now decoded by row stride instead of being
+  dropped as `None`. Camera-app files decode exactly as before.
+- Everything is unchanged for Camera-app photos: with `camera=None` (the
+  default) the iPhone 14 calibration polynomial is used bit-for-bit, and
+  `load_image()` never switches them to file intrinsics.
 
 ## [0.6.2] - 2026-09-27
 

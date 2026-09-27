@@ -41,6 +41,8 @@ def compute_mouth_measurement_from_facemesh(
     photo_h,
     float_min,
     float_max,
+    *,
+    camera=None,
 ):
     """Compute mouth opening from FaceMesh landmarks using depth map.
 
@@ -50,6 +52,8 @@ def compute_mouth_measurement_from_facemesh(
     :param photo_h: photo height in pixels
     :param float_min: EXIF FloatMinValue
     :param float_max: EXIF FloatMaxValue
+    :param camera: optional :class:`portrait_analyser.camera.CameraModel`;
+        ``None`` keeps the legacy calibration polynomial
     :returns: MouthMeasurement or None if computation fails
     """
     if len(landmarks) < max(_UPPER_LIP_OUTER, _LOWER_LIP_OUTER) + 1:
@@ -84,6 +88,7 @@ def compute_mouth_measurement_from_facemesh(
             float(float_max),
             photo_w,
             photo_h,
+            camera=camera,
         )
         if result_3d is not None:
             distance_3d_mm, upper_distance_cm, lower_distance_cm = result_3d

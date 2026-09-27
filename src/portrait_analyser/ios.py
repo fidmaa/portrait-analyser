@@ -1,12 +1,23 @@
+import logging
+import sys
 import xml.etree.ElementTree as ET
 from typing import Union
 
+import numpy as np
 import piexif
 import pyheif
 from PIL import Image, ImageDraw
 
 from . import const
-from .exceptions import ExifValidationFailed, NoDepthMapFound, UnknownExtension
+from .apple_depth import encode_depth_as_disparity_8bit, read_apple_depth
+from .camera import CameraModel, intrinsics_in_photo_space, rotate_by_exif_orientation
+from .exceptions import (
+    AppleDepthDecodeError,
+    AppleDepthUnavailable,
+    ExifValidationFailed,
+    NoDepthMapFound,
+    UnknownExtension,
+)
 from .face import (
     TEETH_MEASUREMENT_MIN_HEIGHT_FRACTION,
     detect_teeth_arches,
@@ -17,6 +28,8 @@ from .face import (
     teeth_threshold,
 )
 from .incisor import compute_incisor_distance_3d, depth_raw_to_distance_cm
+
+logger = logging.getLogger(__name__)
 
 # Value used to test the binary teeth mask image (teeth 255, background 0).
 MASK_ON = 128
@@ -74,6 +87,11 @@ class IOSPortrait:
         incisor_measurement=None,
         teeth_threshold=None,
         teeth_arches=None,
+        depth_m=None,
+        depth_accuracy=None,
+        depth_filtered=None,
+        focal_length_px=None,
+        principal_point_px=None,
     ):
         self.photo = photo
         self.depthmap = depthmap
@@ -91,6 +109,34 @@ class IOSPortrait:
         self.teeth_arches = teeth_arches
         self.floatValueMin = float(floatValueMin) if floatValueMin is not None else None
         self.floatValueMax = float(floatValueMax) if floatValueMax is not None else None
+        # Full-precision depth in metres (float32, NaN = invalid), rotated to
+        # the upright photo's orientation, at the depth sensor's resolution.
+        # Only set for files whose depth was read via the macOS
+        # ImageIO/AVFoundation reader (the 16-bit capture-app format);
+        # ``depthmap`` is its 8-bit disparity re-encoding.
+        self.depth_m = depth_m
+        # AVDepthData accuracy: "absolute", "relative", or None if unknown
+        # (not macOS / pyobjc unavailable). "relative" depth (iPhone 17 Pro
+        # Camera app) is known to underestimate distance by 7-28 %.
+        self.depth_accuracy = depth_accuracy
+        # AVDepthData isDepthDataFiltered, or None if unknown.
+        self.depth_filtered = depth_filtered
+        # File intrinsics in pixels of ``photo`` (upright): (fx, fy) and
+        # (cx, cy). Only set for the capture-app format; legacy Camera-app
+        # files keep None and are measured with the calibration polynomial.
+        self.focal_length_px = focal_length_px
+        self.principal_point_px = principal_point_px
+
+    @property
+    def camera(self):
+        """:class:`~portrait_analyser.camera.CameraModel` from the file intrinsics, or None.
+
+        Pass it as ``camera=`` to the metric functions (``pixel_to_mm`` via
+        ``focal_px``/``principal_px``, ``compute_incisor_distance_3d``,
+        ``measure_filtered_surface_length``, ...). ``None`` for legacy
+        Camera-app files, which keeps the calibration polynomial.
+        """
+        return CameraModel.from_portrait(self)
 
     def teeth_bbox_translated(self, max_wi, max_he):
         if self.teeth_bbox is None:
@@ -154,7 +200,14 @@ def _decode_picture(raw_image):
 
 
 def _decode_semantic_map(raw_image):
-    """Decode a semantic segmentation map (teeth/skin) using the Apple format."""
+    """Decode a semantic segmentation map (teeth/skin) using the Apple format.
+
+    Camera-app mattes are decoded with the historical layout (RGB rows
+    padded by 14 bytes, read as a 3x-wide "L" image that the caller resizes
+    to the photo). When that layout does not fit -- capture-app files use
+    other row paddings (e.g. none, or 8 bytes) -- the matte is decoded
+    properly using the row stride and its first channel is returned.
+    """
     loaded = raw_image.load()
     try:
         return Image.frombytes(
@@ -163,7 +216,119 @@ def _decode_semantic_map(raw_image):
             loaded.data,
         )
     except ValueError:
+        logger.debug(
+            "semantic matte %s (stride %s) does not fit the Camera-app layout; "
+            "decoding it by stride",
+            loaded.size,
+            loaded.stride,
+            exc_info=True,
+        )
+    try:
+        decoded = Image.frombytes(
+            loaded.mode, loaded.size, loaded.data, "raw", loaded.mode, loaded.stride
+        )
+    except ValueError:
+        logger.warning(
+            "could not decode semantic matte %s mode %s stride %s",
+            loaded.size,
+            loaded.mode,
+            loaded.stride,
+            exc_info=True,
+        )
         return None
+    if len(decoded.getbands()) > 1:
+        return decoded.getchannel(0)
+    return decoded
+
+
+def _load_pyheif_depth(primary_image):
+    """Decode the depth aux image with pyheif (raises ``HeifError`` on 16-bit)."""
+    return primary_image.depth_image.image.load()
+
+
+def _read_apple_depth_info(fileName):
+    """Best-effort AVDepthData metadata for a file pyheif decoded fine.
+
+    Returns the :class:`AppleDepthData` or None when the macOS reader is not
+    available here / fails; failures are logged, never raised, because the
+    legacy pyheif path does not depend on them.
+    """
+    if sys.platform != "darwin":
+        return None
+    try:
+        return read_apple_depth(fileName)
+    except AppleDepthUnavailable:
+        logger.info("macOS depth reader unavailable; depth accuracy unknown", exc_info=True)
+    except AppleDepthDecodeError:
+        logger.warning(
+            "macOS depth reader failed on %s; depth accuracy unknown", fileName, exc_info=True
+        )
+    return None
+
+
+def _load_depth_via_apple(fileName, pyheif_error):
+    """Read a depth map pyheif could not decode (16-bit disparity) via macOS.
+
+    :raises NoDepthMapFound: when the macOS reader is unavailable, fails or
+        finds no depth -- chained to the underlying error.
+    """
+    try:
+        apple = read_apple_depth(fileName)
+    except AppleDepthUnavailable as exc:
+        raise NoDepthMapFound(
+            f"{fileName}: pyheif cannot decode the depth map ({pyheif_error}); "
+            "this format (16-bit disparity) needs the macOS ImageIO/AVFoundation "
+            f"reader, which is unavailable here: {exc}"
+        ) from exc
+    except AppleDepthDecodeError as exc:
+        raise NoDepthMapFound(
+            f"{fileName}: neither pyheif ({pyheif_error}) nor the macOS reader "
+            f"could decode the depth map: {exc}"
+        ) from exc
+    if apple is None:
+        raise NoDepthMapFound(
+            f"{fileName}: pyheif cannot decode the depth map ({pyheif_error}) and "
+            "ImageIO finds no depth/disparity data"
+        ) from pyheif_error
+    return apple
+
+
+def _apple_depth_for_photo(apple, fileName, photo_size):
+    """Upright depth (metres), its 8-bit disparity encoding and photo intrinsics.
+
+    The depth map comes in sensor orientation; the photo/mattes are already
+    upright, so only the depth is rotated (by the file's EXIF orientation).
+    """
+    depth_m = rotate_by_exif_orientation(apple.depth_m, apple.exif_orientation)
+    depth_h, depth_w = depth_m.shape
+    photo_w, photo_h = photo_size
+    if abs(depth_w / depth_h - photo_w / photo_h) > 0.01 * (photo_w / photo_h):
+        logger.warning(
+            "%s: rotated depth map %sx%s does not match the photo aspect %sx%s "
+            "(EXIF orientation %s); depth may be misaligned",
+            fileName,
+            depth_w,
+            depth_h,
+            photo_w,
+            photo_h,
+            apple.exif_orientation,
+        )
+    try:
+        depth_image, float_min, float_max = encode_depth_as_disparity_8bit(depth_m)
+    except ValueError as exc:
+        raise NoDepthMapFound(f"{fileName}: depth map has no usable pixels: {exc}") from exc
+
+    focal = principal = None
+    if apple.intrinsics is not None and apple.intrinsics_reference_size is not None:
+        sensor_h, sensor_w = apple.depth_m.shape
+        focal, principal = intrinsics_in_photo_space(
+            apple.intrinsics,
+            apple.intrinsics_reference_size,
+            (sensor_w, sensor_h),
+            apple.exif_orientation,
+            photo_size,
+        )
+    return np.ascontiguousarray(depth_m), depth_image, float_min, float_max, focal, principal
 
 
 def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
@@ -193,20 +358,59 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
             elif aux_type == "urn:com:apple:photo:2019:aux:semantichairmatte":
                 hair_raw = aux.image
 
-        # Decode depth map
-        depth_loaded = primary_image.depth_image.image.load()
-        float_min, float_max = _parse_depth_metadata(depth_loaded)
-        depth_image = Image.frombytes(
-            depth_loaded.mode, depth_loaded.size, depth_loaded.data
-        )
+        # Decode depth map. Camera-app files carry 8-bit disparity pyheif can
+        # decode; the TrueDepth capture app stores 16-bit disparity, which
+        # pyheif rejects ("Unsupported JPEG data precision 16") -- those are
+        # read via macOS ImageIO/AVFoundation instead (see apple_depth.py).
+        apple_depth = None
+        try:
+            depth_loaded = _load_pyheif_depth(primary_image)
+        except pyheif.error.HeifError as exc:
+            logger.info(
+                "%s: pyheif cannot decode the depth map (%s); using the macOS reader",
+                fileName,
+                exc,
+            )
+            apple_depth = _load_depth_via_apple(fileName, exc)
+
+        depth_m = depth_accuracy = depth_filtered = None
+        focal_length_px = principal_point_px = None
+        if apple_depth is None:
+            float_min, float_max = _parse_depth_metadata(depth_loaded)
+            depth_image = Image.frombytes(
+                depth_loaded.mode, depth_loaded.size, depth_loaded.data
+            )
+            depth_info = _read_apple_depth_info(fileName)
+            if depth_info is not None:
+                depth_accuracy = depth_info.accuracy
+                depth_filtered = depth_info.filtered
 
         # Decode primary picture
         picture_image = _decode_picture(primary_image.image.load())
+
+        if apple_depth is not None:
+            depth_accuracy = apple_depth.accuracy
+            depth_filtered = apple_depth.filtered
+            (
+                depth_m,
+                depth_image,
+                float_min,
+                float_max,
+                focal_length_px,
+                principal_point_px,
+            ) = _apple_depth_for_photo(apple_depth, fileName, picture_image.size)
 
         # Decode semantic maps
         teeth_image = _decode_semantic_map(teeth_raw) if teeth_raw else None
         skin_image = _decode_semantic_map(skin_raw) if skin_raw else None
         hair_image = _decode_semantic_map(hair_raw) if hair_raw else None
+
+    # File intrinsics (capture-app format only); None = calibration polynomial.
+    camera = (
+        CameraModel(*focal_length_px, *principal_point_px)
+        if focal_length_px is not None and principal_point_px is not None
+        else None
+    )
 
     # Process teeth map: resize and analyze
     teeth_bbox = None
@@ -287,6 +491,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                         float(float_max),
                         photo_w,
                         photo_h,
+                        camera=camera,
                     )
                     if legacy_3d is not None:
                         incisor_distance_3d_mm = legacy_3d[0]
@@ -353,6 +558,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                             float(float_max),
                             photo_w,
                             photo_h,
+                            camera=camera,
                         )
                         if result_3d is not None:
                             distance_3d_mm, upper_distance_cm, lower_distance_cm = (
@@ -394,6 +600,11 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         incisor_measurement=incisor_measurement,
         teeth_threshold=teeth_cutoff,
         teeth_arches=teeth_arches,
+        depth_m=depth_m,
+        depth_accuracy=depth_accuracy,
+        depth_filtered=depth_filtered,
+        focal_length_px=focal_length_px,
+        principal_point_px=principal_point_px,
     )
 
 

@@ -360,6 +360,8 @@ def compute_neck_width_3d(
     float_min: float,
     float_max: float,
     n_samples: int = 25,
+    *,
+    camera=None,
 ) -> tuple[float | None, float | None]:
     """Compute 3D neck width by sampling points across the neck row.
 
@@ -378,12 +380,14 @@ def compute_neck_width_3d(
         float_min: EXIF FloatMinValue from depth metadata.
         float_max: EXIF FloatMaxValue from depth metadata.
         n_samples: Number of sample points across the neck.
+        camera: Optional CameraModel (file intrinsics); None keeps the
+            legacy calibration polynomial.
 
     Returns:
         (front_arc_mm, straight_width_mm) or (None, None).
     """
     from .face import sample_depth_at_point
-    from .incisor import depth_raw_to_distance_cm, pixel_to_mm, vector_length_3d
+    from .incisor import depth_raw_to_distance_cm, point_to_mm, vector_length_3d
 
     # Inset edges by 5% to avoid unreliable edge depths
     span = neck_right_x - neck_left_x
@@ -408,10 +412,10 @@ def compute_neck_width_3d(
             continue
 
         # Convert pixel coords to mm at this depth
-        x_mm = pixel_to_mm(x, z_cm, photo_width)
-        y_mm = pixel_to_mm(float(neck_y), z_cm, photo_height)
-        if x_mm is None or y_mm is None:
+        point_mm = point_to_mm(x, float(neck_y), z_cm, photo_width, photo_height, camera)
+        if point_mm is None:
             continue
+        x_mm, y_mm = point_mm
 
         z_mm = z_cm * 10.0
         points_3d.append((x_mm, y_mm, z_mm))
@@ -568,6 +572,8 @@ def detect_neck_midpoint_from_dual_mask(
     skin_threshold: int = 30,
     float_min: float | None = None,
     float_max: float | None = None,
+    *,
+    camera=None,
 ) -> tuple[NeckMidpoint | None, SegmentationDebug | None]:
     """Detect neck midpoint using skin matte, depth map, and silhouette.
 
@@ -586,6 +592,8 @@ def detect_neck_midpoint_from_dual_mask(
         skin_threshold: Minimum pixel value in skinmap to count as skin.
         float_min: EXIF FloatMinValue for depth calibration, or None.
         float_max: EXIF FloatMaxValue for depth calibration, or None.
+        camera: Optional CameraModel (file intrinsics) for the 3D neck
+            width; None keeps the legacy calibration polynomial.
 
     Returns:
         2-tuple of (NeckMidpoint | None, SegmentationDebug | None).
@@ -739,6 +747,7 @@ def detect_neck_midpoint_from_dual_mask(
             image.size[1],
             float_min,
             float_max,
+            camera=camera,
         )
         if neck_width_front_arc_mm is not None:
             print(

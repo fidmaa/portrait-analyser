@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw, ImageFilter
 
 from .depth_sampling import median_filter_depthmap, sample_filtered_depth
 from .face import find_neck_measurement_point, sample_depth_at_point
-from .incisor import depth_raw_to_distance_cm, pixel_to_mm, vector_length_3d
+from .incisor import depth_raw_to_distance_cm, point_to_mm, vector_length_3d
 
 
 def _ellipse_circumference(a: float, b: float) -> float:
@@ -423,6 +423,8 @@ def compute_neck_circumference(
     neck_midpoint_y=None,  # float — MediaPipe neck midpoint Y for arc center
     hairmap=None,  # optional PIL hair matte, removed from the allowed neck surface
     hair_threshold=30,
+    *,
+    camera=None,  # CameraModel or None (None = legacy calibration polynomial)
 ) -> NeckMeasurement | None:
     """Compute neck circumference by densely sampling the front arc.
 
@@ -601,10 +603,10 @@ def compute_neck_circumference(
             continue
 
         # Convert pixel coordinates to physical mm at this depth
-        x_mm = pixel_to_mm(sx, z_cm, photo_width)
-        y_mm = pixel_to_mm(sample_y, z_cm, photo_height)
-        if x_mm is None or y_mm is None:
+        point_mm = point_to_mm(sx, sample_y, z_cm, photo_width, photo_height, camera)
+        if point_mm is None:
             continue
+        x_mm, y_mm = point_mm
 
         # Z in mm for consistent units
         z_mm = z_cm * 10.0
