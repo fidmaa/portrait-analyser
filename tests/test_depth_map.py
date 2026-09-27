@@ -9,7 +9,11 @@ from PIL import Image, ImageDraw
 from portrait_analyser import apple_depth, ios
 from portrait_analyser.apple_depth import encode_depth_as_disparity_8bit
 from portrait_analyser.camera import CameraModel
-from portrait_analyser.depth_map import FLOAT_DETECTOR_CODE_RANGE, FloatDepthMap, LegacyDepthMap
+from portrait_analyser.depth_map import (
+    FLOAT_DETECTOR_CODE_RANGE,
+    FloatDepthMap,
+    LegacyDepthMap,
+)
 from portrait_analyser.depth_sampling import (
     measure_filtered_surface_length,
     median_filter_depthmap,
@@ -17,7 +21,10 @@ from portrait_analyser.depth_sampling import (
 )
 from portrait_analyser.extended_neck import compute_neck_width_3d
 from portrait_analyser.face import sample_depth_at_point
-from portrait_analyser.incisor import compute_incisor_distance_3d, depth_raw_to_distance_cm
+from portrait_analyser.incisor import (
+    compute_incisor_distance_3d,
+    depth_raw_to_distance_cm,
+)
 from portrait_analyser.mouth import compute_mouth_measurement_from_facemesh
 from portrait_analyser.neck import compute_neck_circumference
 from portrait_analyser.tmd import compute_tmd_3d

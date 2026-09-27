@@ -19,7 +19,10 @@ from portrait_analyser.depth_sampling import (
 )
 from portrait_analyser.extended_neck import compute_neck_width_3d
 from portrait_analyser.mouth import compute_mouth_measurement_from_facemesh
-from portrait_analyser.neck import compute_neck_circumference, find_stable_depth_x_from_edge
+from portrait_analyser.neck import (
+    compute_neck_circumference,
+    find_stable_depth_x_from_edge,
+)
 from portrait_analyser.tmd import compute_tmd_3d
 
 GOLDEN = {

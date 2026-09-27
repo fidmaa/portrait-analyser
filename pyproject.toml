@@ -1,6 +1,6 @@
 [project]
 name = "portrait-analyser"
-version = "0.7.0"
+version = "0.8.0"
 description = "Python module for portrait picture analysis"
 authors = [
     {name = "Michał Pasternak", email = "michal.dtz@gmail.com"},
@@ -32,6 +32,9 @@ dependencies = [
     "pillow>=10.2.0",
     "numpy>=1.26.4",
     "mediapipe>=0.10.0",
+    # cv2 is used on the core path (bilateral smoothing, face width); same
+    # distribution mediapipe installs, so no opencv-python/contrib clash.
+    "opencv-contrib-python>=4.8",
     "pyheif-iplweb>=0.7.1.dev1176; sys_platform == 'darwin'",
     "pyheif>=0.7.1; sys_platform == 'linux'",
     "pyobjc-framework-quartz>=12.2 ; sys_platform == 'darwin'",
