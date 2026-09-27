@@ -76,6 +76,7 @@ from .mouth import MouthMeasurement, compute_mouth_measurement_from_facemesh
 from .neck import (
     NeckMeasurement,
     compute_neck_circumference,
+    ellipse_circumference,
     estimate_face_from_skinmap,
     find_stable_depth_x_from_edge,
     neck_search_bounds_from_face_landmarks,
@@ -92,7 +93,7 @@ from .neck_width import (
     NeckWidthResult,
     NeckWidthRow,
     circumference_ellipse_range,
-    circumference_pi_w,
+    circumference_circle,
     measure_neck_width,
     neck_width_from_edges,
 )
@@ -115,7 +116,8 @@ __all__ = [
     "NeckWidthResult",
     "NeckWidthRow",
     "circumference_ellipse_range",
-    "circumference_pi_w",
+    "circumference_circle",
+    "ellipse_circumference",
     "measure_neck_width",
     "neck_width_from_edges",
     "DISPARITY_FAR_CAP_M",

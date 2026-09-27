@@ -22,7 +22,7 @@ from .incisor import point_to_mm, vector_length_3d
 MAX_DROPPED_ARC_FRACTION = 0.2
 
 
-def _ellipse_circumference(a: float, b: float) -> float:
+def ellipse_circumference(a: float, b: float) -> float:
     """Approximate ellipse perimeter using Ramanujan's formula.
 
     Parameters:
@@ -32,6 +32,10 @@ def _ellipse_circumference(a: float, b: float) -> float:
     Returns perimeter in mm.
     """
     return math.pi * (3 * (a + b) - math.sqrt((3 * a + b) * (a + 3 * b)))
+
+
+# Pre-0.9 private name.
+_ellipse_circumference = ellipse_circumference
 
 
 @dataclass

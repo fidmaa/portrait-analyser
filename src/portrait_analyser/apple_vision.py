@@ -88,6 +88,11 @@ def _import_backend():
             "Apple Vision body pose requires the pyobjc-framework-Vision and "
             "pyobjc-framework-Quartz packages, which are not importable here."
         ) from exc
+    if not hasattr(Vision, "VNDetectHumanBodyPoseRequest"):
+        # VNDetectHumanBodyPoseRequest needs macOS 11+.
+        raise AppleVisionUnavailable(
+            "this macOS Vision framework has no VNDetectHumanBodyPoseRequest (macOS 11+)"
+        )
     return Vision, Quartz
 
 

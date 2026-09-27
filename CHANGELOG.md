@@ -9,33 +9,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - `neck_width` module: width-based neck measurement for TrueDepth
-  capture-app photos (float depth + file intrinsics).
-  `measure_neck_width(portrait, *, face_mesh=None, body_pose=None,
-  camera=None, use_vision=True)` returns a `NeckWidthResult` (`status`,
-  `row_y`, `left_x`, `right_x`, `width_mm`, `rows_used`, `band`,
-  `band_source`, `circumference_pi_w_mm`, `circumference_ellipse_mm`,
+  capture-app photos (float depth with absolute accuracy + file
+  intrinsics). `measure_neck_width(portrait, *, face_mesh=None,
+  body_pose=None, camera=None, use_vision=True)` returns a
+  `NeckWidthResult` (`status`, `quality` + `quality_reasons`, `row_y`,
+  `left_x`, `right_x`, `width_mm`, `rows_used`, `support_mm`,
+  `height_below_chin_mm`, `roll_deg`, `neck_roll_deg`, `band`,
+  `band_source`, `circumference_circle_mm`, `circumference_ellipse_mm`,
   `warnings`, `message`, per-row `rows`), or None for Camera-app files.
   Edges come from the skin matte; the depth only validates them (outside
-  nearer than inside = collar) and gives each edge's depth 3 mm inside it.
-  Rows with oblique edges (open-collar V), edges off the facial midline or
-  left/right depths more than 4 cm apart are rejected; the width is the
-  median over the topmost run of at least 3 clean, stable rows, else
-  `status="edges-occluded"`. The band runs from the chin (FaceMesh 152) to
-  Apple Vision's neck joint, or 6 cm below the chin without Vision
-  (`band_source="chin-offset"`). Circumference: pi*W (upper bound) and a
-  Ramanujan ellipse range for b/a 0.85-0.90 (population assumption). No
-  front-arc or sagitta model: on frontal portraits they swing 15-30 % with
-  the row. Float files without intrinsics get `status="no-camera"`
-  (pass `camera=` to measure with assumed intrinsics).
+  nearer than inside by 0.5 cm = collar, rejected; 0.2-0.5 cm = "collar
+  close to the neck edge", low quality) and gives each edge's depth 3 mm
+  inside it. Rows with oblique edges (open-collar V), edges off-centre or
+  asymmetric about the facial midline, wider than the FaceMesh jaw (a hand
+  next to the neck) or left/right depths more than 4 cm apart are
+  rejected; the width is the median over the topmost run of clean, stable
+  rows spanning at least 2 mm (low quality below 5 mm), else
+  `status="edges-occluded"`. Head or neck roll above 8 degrees warns. The
+  band runs from the chin (FaceMesh 152) to Apple Vision's neck joint, or
+  6 cm below the chin without Vision (`band_source="chin-offset"`).
+  Circumference: pi*W (circle model) and a Ramanujan ellipse range for
+  b/a 0.85-0.90 (population assumption). `width_mm` reads 0-5 % low (depth
+  3 mm inside the silhouette); the b/a prior and this bias are
+  co-calibrated on one person, and repeatability between photos is about
+  4 %. No front-arc or sagitta model: on frontal portraits they swing
+  15-30 % with the row. Float files without intrinsics get
+  `status="no-camera"` (pass `camera=` to measure with assumed
+  intrinsics); non-absolute depth gets `status="relative-depth"` even with
+  `camera=`; a portrait without depth gets `"no-depth"`.
 - `neck_width_from_edges(portrait, left_xy, right_xy)`: the same width
-  from two clicked edges, with the collar warning.
+  from two clicked edges, with the collar warnings.
 - `IOSPortrait.neck_width`: `measure_neck_width` computed lazily on first
-  access (load time unchanged; first access ~1.5 s cold for the FaceMesh
-  model plus ~0.5 s for the first Vision request, ~0.1 s after).
+  access (load time unchanged; first access ~0.8 s cold for the FaceMesh
+  model and the first Vision request, ~0.1 s after). An exception is
+  logged and cached as a `status="error"` result.
 - `apple_vision` module: `detect_body_pose(photo) -> BodyPose | None`,
   `VNDetectHumanBodyPoseRequest` on a padded canvas (photo at 1/3 scale;
   the full frame of a close portrait yields no person). macOS only, lazy
-  pyobjc import; `AppleVisionUnavailable` / `AppleVisionError`.
+  pyobjc import; `AppleVisionUnavailable` (also on macOS < 11) /
+  `AppleVisionError`.
+- `neck.ellipse_circumference()` is public (the old private name remains).
 - Dependency: `pyobjc-framework-vision>=12.2` on macOS.
 
 ## [0.8.0] - 2026-09-28

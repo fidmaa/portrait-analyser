@@ -238,12 +238,23 @@ class IOSPortrait:
         and, on macOS, Apple Vision body pose (~0.5 s for the first request
         in a process, ~0.04 s after). See
         :func:`~portrait_analyser.neck_width.measure_neck_width`; call that
-        directly to pass landmarks, a body pose or intrinsics.
+        directly to pass landmarks, a body pose or intrinsics. If the
+        measurement raises, the exception is logged and an ``"error"``
+        result is cached instead.
         """
         if self._neck_width is _NOT_COMPUTED:
-            from .neck_width import measure_neck_width
+            from .neck_width import STATUS_ERROR, NeckWidthResult, measure_neck_width
 
-            self._neck_width = measure_neck_width(self)
+            try:
+                self._neck_width = measure_neck_width(self)
+            except Exception as exc:
+                # Cached as an "error" result so a GUI repaint does not rerun
+                # (and re-fail) the measurement; the traceback is logged.
+                logger.exception("automatic neck width measurement failed")
+                self._neck_width = NeckWidthResult(
+                    status=STATUS_ERROR,
+                    message=f"neck width measurement failed: {type(exc).__name__}: {exc}",
+                )
         return self._neck_width
 
     @neck_width.setter

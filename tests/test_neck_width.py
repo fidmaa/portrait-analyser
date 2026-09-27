@@ -26,14 +26,14 @@ from portrait_analyser.neck_width import (
     STATUS_NO_CAMERA,
     STATUS_NO_FACE,
     STATUS_OK,
+    circumference_circle,
     circumference_ellipse_range,
-    circumference_pi_w,
     measure_neck_width,
     neck_width_from_edges,
 )
 
 PHOTO_W, PHOTO_H = 1200, 1600
-DEPTH_SCALE = 4  # photo pixels per depth pixel (real files: ~6.3)
+DEPTH_SCALE = 2  # photo px per depth px: ~0.9 mm at the neck (real files: ~1 mm)
 FX = 1100.0  # pixels (the real 2771 px at 3024 wide, scaled to 1200)
 CX, CY = PHOTO_W / 2, PHOTO_H / 2
 NECK_RADIUS_MM = 65.0
@@ -131,9 +131,15 @@ def make_portrait(*, collar=None, camera=True, face_width_px=500):
     )
 
 
-def face_mesh():
+JAW_HALF_WIDTH_PX = 150.0  # neck silhouette is ~283 px wide
+
+
+def face_mesh(roll_deg=0.0):
     landmarks = [(CX, CHIN_Y - 300.0)] * 478
     landmarks[152] = (CX, CHIN_Y)
+    landmarks[1] = (CX - 300.0 * math.tan(math.radians(roll_deg)), CHIN_Y - 300.0)  # nose
+    landmarks[172] = (CX - JAW_HALF_WIDTH_PX, CHIN_Y - 60.0)
+    landmarks[397] = (CX + JAW_HALF_WIDTH_PX, CHIN_Y - 60.0)
     return landmarks
 
 
@@ -144,8 +150,8 @@ def body_pose():
 # -- circumference maths ------------------------------------------------------
 
 
-def test_pi_w():
-    assert circumference_pi_w(130.0) == pytest.approx(math.pi * 130.0)
+def test_circle_model():
+    assert circumference_circle(130.0) == pytest.approx(math.pi * 130.0)
 
 
 def test_ellipse_range_matches_ramanujan():
@@ -156,11 +162,11 @@ def test_ellipse_range_matches_ramanujan():
     low, high = circumference_ellipse_range(130.0)
     assert low == pytest.approx(ramanujan(65.0, 0.85 * 65.0), rel=1e-9)
     assert high == pytest.approx(ramanujan(65.0, 0.90 * 65.0), rel=1e-9)
-    # 0.93-0.95 x pi W, below the circle's upper bound.
+    # 0.93-0.95 x pi W, below the circle model.
     assert 0.92 * math.pi * 130 < low < high < 0.96 * math.pi * 130
 
 
-def test_ellipse_of_a_circle_is_pi_w():
+def test_ellipse_of_a_circle_is_the_circle_model():
     low, high = circumference_ellipse_range(100.0, (1.0, 1.0))
     assert low == pytest.approx(math.pi * 100.0) and high == pytest.approx(math.pi * 100.0)
 
@@ -168,7 +174,7 @@ def test_ellipse_of_a_circle_is_pi_w():
 # -- automatic measurement ----------------------------------------------------
 
 
-def test_cylinder_width_within_two_percent():
+def test_cylinder_width_matches_the_method_definition():
     result = measure_neck_width(make_portrait(), face_mesh=face_mesh(), body_pose=body_pose())
     assert result.status == STATUS_OK, result.message
     assert result.band_source == BAND_SOURCE_VISION
@@ -180,9 +186,20 @@ def test_cylinder_width_within_two_percent():
     assert result.left_x == pytest.approx(left, abs=2)
     assert result.right_x == pytest.approx(right, abs=2)
     assert CHIN_Y < result.row_y <= NECK_JOINT_Y
-    assert len(result.rows_used) >= neck_width.MIN_CLEAN_ROWS
-    assert result.row_y == result.rows_used[-1]
-    assert result.circumference_pi_w_mm == pytest.approx(math.pi * result.width_mm)
+    assert result.row_y in result.rows_used
+    used = [r for r in result.rows if r.y in result.rows_used]
+    nearest = min(used, key=lambda r: abs(r.width_mm - result.width_mm))
+    assert result.row_y == nearest.y  # the row nearest the median, not the last
+    assert result.quality == "good" and result.quality_reasons == []
+    assert result.support_mm >= neck_width.GOOD_SUPPORT_MM
+    z_edge = 0.5 * (result.left_depth_cm + result.right_depth_cm) * 10
+    assert result.height_below_chin_mm == pytest.approx(
+        (result.row_y - CHIN_Y) * z_edge / FX, rel=1e-6
+    )
+    assert result.height_below_chin_mm > neck_width.CHIN_CLEARANCE_MM
+    assert result.roll_deg == pytest.approx(0.0)
+    assert abs(result.neck_roll_deg) < 1.0
+    assert result.circumference_circle_mm == pytest.approx(math.pi * result.width_mm)
     assert result.circumference_ellipse_mm == circumference_ellipse_range(result.width_mm)
     assert result.warnings == []
 
@@ -192,7 +209,7 @@ def test_collar_outside_nearer_is_rejected_with_warning():
     portrait = make_portrait(collar=(CHIN_Y, 20.0))
     result = measure_neck_width(portrait, face_mesh=face_mesh(), body_pose=body_pose())
     assert result.status == STATUS_EDGES_OCCLUDED
-    assert result.width_mm is None and result.circumference_pi_w_mm is None
+    assert result.width_mm is None and result.circumference_circle_mm is None
     assert "neck edges not visible" in result.message
     assert any("outside nearer than neck edge (collar?)" in w for w in result.warnings)
     assert result.rows and not any(r.left_ok or r.right_ok for r in result.rows)
@@ -406,7 +423,7 @@ def test_width_from_clicked_edges():
     assert result.left_x == pytest.approx(left) and result.right_x == pytest.approx(right)
     assert result.rows_used == [y]
     assert result.width_mm == pytest.approx(expected_method_width_mm(), rel=0.02)
-    assert result.circumference_pi_w_mm == pytest.approx(math.pi * result.width_mm)
+    assert result.circumference_circle_mm == pytest.approx(math.pi * result.width_mm)
     assert result.warnings == []
 
 
@@ -427,3 +444,254 @@ def test_clicked_edges_without_depth():
     result = neck_width_from_edges(portrait, (100, 900), (300, 900))
     assert result.status == "no-depth"
     assert result.width_mm is None
+
+
+# -- review follow-ups -----------------------------------------------------------
+
+
+def _with(portrait, *, skin=None, depth_m=None):
+    return IOSPortrait(
+        photo=portrait.photo,
+        skinmap=Image.fromarray(skin, "L") if skin is not None else portrait.skinmap,
+        depth_m=depth_m if depth_m is not None else portrait.depth_m,
+        depth_accuracy="absolute",
+        depth_plausible=True,
+        focal_length_px=(FX, FX),
+        principal_point_px=(CX, CY),
+    )
+
+
+def _depth_coords(depth_m):
+    rows, cols = depth_m.shape
+    us = np.arange(cols) * (PHOTO_W - 1) / (cols - 1)
+    vs = np.arange(rows) * (PHOTO_H - 1) / (rows - 1)
+    return us, vs
+
+
+def test_hand_next_to_the_neck_is_rejected():
+    """Skin (a hand) 25 mm wide against one side, 1 cm nearer than the edge:
+    the outside is background, so only the symmetry / jaw checks catch it."""
+    base = make_portrait()
+    skin = np.asarray(base.skinmap).copy()
+    depth = base.depth_m.copy()
+    _, right = _silhouette_columns()
+    z = _inset_depth_mm()
+    hand_px = 25.0 * FX / z
+    skin[int(CHIN_Y) :, int(right) : int(right + hand_px)] = 255
+    us, vs = _depth_coords(depth)
+    cols = (us >= right) & (us < right + hand_px)
+    depth[np.ix_(vs >= CHIN_Y, cols)] = (z - 10.0) / 1000.0
+    result = measure_neck_width(
+        _with(base, skin=skin, depth_m=depth), face_mesh=face_mesh(), body_pose=body_pose()
+    )
+    assert result.status == STATUS_EDGES_OCCLUDED
+    assert any("asymmetric" in r.reject_reason for r in result.rows)
+    assert any("wider than the jaw" in r.reject_reason for r in result.rows)
+
+
+def test_marginal_collar_is_kept_but_low_quality():
+    # Outside nearer by ~0.3-0.45 cm (edge-dependent): below the 0.5 cm rejection.
+    for nearer_mm in (2.0, 3.0):
+        result = measure_neck_width(
+            make_portrait(collar=(CHIN_Y, nearer_mm)), face_mesh=face_mesh(), body_pose=body_pose()
+        )
+        assert result.status == STATUS_OK
+        assert result.quality == "low"
+        assert any("collar close to the neck edge" in r for r in result.quality_reasons)
+        assert any("collar close to the neck edge" in w for w in result.warnings)
+
+
+def test_head_roll_warns_and_lowers_quality():
+    result = measure_neck_width(
+        make_portrait(), face_mesh=face_mesh(roll_deg=12.0), body_pose=body_pose()
+    )
+    assert result.status == STATUS_OK
+    assert result.roll_deg == pytest.approx(12.0, abs=0.01)
+    assert result.quality == "low"
+    assert any("head roll" in w for w in result.warnings)
+
+
+def test_neck_roll_warns_and_lowers_quality():
+    """The neck sheared by 12 degrees (edges within the slope limit)."""
+    base = make_portrait()
+    t = math.tan(math.radians(12.0))
+    skin = np.asarray(base.skinmap).copy()
+    for y in range(int(CHIN_Y), PHOTO_H):
+        skin[y] = np.roll(skin[y], round((y - CHIN_Y) * t))
+    depth = base.depth_m.copy()
+    _us, vs = _depth_coords(depth)
+    for i, y in enumerate(vs):
+        if y >= CHIN_Y:
+            depth[i] = np.roll(depth[i], round((y - CHIN_Y) * t / DEPTH_SCALE))
+    result = measure_neck_width(
+        _with(base, skin=skin, depth_m=depth), face_mesh=face_mesh(), use_vision=False
+    )
+    assert result.status == STATUS_OK
+    assert result.neck_roll_deg == pytest.approx(12.0, abs=2.0)
+    assert result.quality == "low"
+    assert any("neck roll" in w for w in result.warnings)
+
+
+def test_relative_depth_is_refused_even_with_a_camera():
+    portrait = make_portrait()
+    portrait.depth_accuracy = "relative"
+    explicit = pa.CameraModel(fx=FX, fy=FX, cx=CX, cy=CY)
+    for camera in (None, explicit):
+        result = measure_neck_width(
+            portrait, face_mesh=face_mesh(), use_vision=False, camera=camera
+        )
+        assert result.status == "relative-depth"
+        assert "not 'absolute'" in result.message
+    assert neck_width_from_edges(portrait, (400, 900), (700, 900)).status == "relative-depth"
+
+
+def test_no_camera_messages_distinguish_the_cause():
+    missing = measure_neck_width(make_portrait(camera=False), face_mesh=face_mesh())
+    assert "no camera intrinsics" in missing.message
+
+    class Unusable:  # intrinsics in the file, but portrait.camera is None
+        def __getattr__(self, name):
+            return getattr(portrait, name)
+
+        camera = None
+
+    portrait = make_portrait()
+    result = measure_neck_width(Unusable(), face_mesh=face_mesh(), use_vision=False)
+    assert result.status == STATUS_NO_CAMERA
+    assert "not usable" in result.message
+
+
+def test_portrait_without_depth_is_no_depth():
+    portrait = IOSPortrait(Image.new("RGB", (60, 80)))
+    assert portrait.depth is None
+    assert measure_neck_width(portrait, face_mesh=face_mesh()).status == "no-depth"
+
+
+def test_vision_joint_above_the_chin_falls_back_to_chin_offset():
+    pose = BodyPose(joints={"neck_1_joint": (CX, CHIN_Y - 100.0, 0.9)})
+    result = measure_neck_width(make_portrait(), face_mesh=face_mesh(), body_pose=pose)
+    assert result.band_source == BAND_SOURCE_CHIN_OFFSET
+    assert result.status == STATUS_OK
+    assert any("Vision neck joint not found below the chin" in w for w in result.warnings)
+
+
+def test_skin_span_touching_the_border_has_no_edges():
+    skin = np.zeros((100, 200), dtype=np.float32)
+    skin[:, 0:120] = 255  # runs off the left border
+    kwargs = {"gap_px": 10, "search_px": 150, "min_span_px": 10}
+    assert neck_width.skin_edges_at_row(skin, 50, 60, **kwargs) is None
+    skin[:, 0] = 0
+    left, right = neck_width.skin_edges_at_row(skin, 50, 60, **kwargs)
+    assert 0 < left < 1.5 and right == pytest.approx(119.5, abs=0.6)
+
+
+def test_beard_gap_at_the_midline_is_bridged():
+    skin = np.zeros((100, 400), dtype=np.float32)
+    skin[:, 100:300] = 255
+    skin[:, 185:215] = 0  # dark beard / shadow in the middle
+    edges = neck_width.skin_edges_at_row(skin, 50, 200, gap_px=40, search_px=150, min_span_px=10)
+    assert edges is not None
+    assert edges[0] == pytest.approx(99.5, abs=0.6) and edges[1] == pytest.approx(299.5, abs=0.6)
+
+
+def test_clean_run_is_broken_by_a_tall_gap():
+    def row(y):
+        return neck_width.NeckWidthRow(y, 0, 1, 40, 40, 50, 50, 130.0, True, True)
+
+    rows = [row(10), row(12), row(14), row(40), row(42)]
+    assert [r.y for r in neck_width._topmost_clean_run(rows, 5)] == [10, 12, 14]
+    assert len(neck_width._topmost_clean_run(rows, 50)) == 5
+
+
+def test_neck_width_property_caches_errors(monkeypatch, caplog):
+    calls = []
+
+    def failing(portrait):
+        calls.append(1)
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(neck_width, "measure_neck_width", failing)
+    portrait = make_portrait()
+    with caplog.at_level("ERROR"):
+        first = portrait.neck_width
+    assert first.status == "error" and "boom" in first.message
+    assert portrait.neck_width is first
+    assert calls == [1]
+    assert "neck width measurement failed" in caplog.text
+
+
+# -- Apple Vision with fake frameworks ----------------------------------------------
+
+
+class _Point:
+    def __init__(self, x, y, confidence):
+        self._loc = type("Loc", (), {"x": x, "y": y})()
+        self._confidence = confidence
+
+    def location(self):
+        return self._loc
+
+    def confidence(self):
+        return self._confidence
+
+
+class _Observation:
+    def __init__(self, points):
+        self.points = points
+
+    def confidence(self):
+        return 0.9
+
+    def recognizedPointsForGroupKey_error_(self, key, error):
+        return self.points, None
+
+
+def _fake_vision(points):
+    class Request:
+        def initWithCompletionHandler_(self, handler):
+            return self
+
+        def results(self):
+            return [_Observation(points)]
+
+    class Handler:
+        def initWithCGImage_options_(self, image, options):
+            return self
+
+        def performRequests_error_(self, requests, error):
+            return True, None
+
+    class Vision:
+        VNHumanBodyPoseObservationJointsGroupNameAll = "all"
+        VNImageRequestHandler = type("H", (), {"alloc": staticmethod(Handler)})
+        VNDetectHumanBodyPoseRequest = type("R", (), {"alloc": staticmethod(Request)})
+
+    return Vision
+
+
+def test_detect_body_pose_maps_vision_points_to_photo_pixels(monkeypatch):
+    monkeypatch.setattr(apple_vision, "_cgimage_from_rgb", lambda quartz, image: (object(), b""))
+    photo = Image.new("RGB", (300, 400))
+    # Canvas 150x200 (half resolution), photo at 1/6 scale = 50x67 pasted at
+    # ((150 - 50) // 2, (200 - 67) // 3) = (50, 44).
+    vision = _fake_vision(
+        {
+            "neck_1_joint": _Point(0.5, 0.25, 0.7),  # canvas (75, 150), origin bottom-left
+            "nose_joint": _Point(0.4, 0.75, 0.0),  # confidence 0: dropped
+        }
+    )
+    pose = apple_vision._detect_body_pose(vision, None, photo)
+    x, y, confidence = pose.neck()
+    assert x == pytest.approx((75 - 50) * 6)
+    assert y == pytest.approx((150 - 44) * 6)
+    assert confidence == 0.7
+    assert "nose_joint" not in pose.joints
+
+
+def test_old_macos_without_body_pose_request_is_unavailable(monkeypatch):
+    fake = type(sys)("Vision")
+    monkeypatch.setattr(apple_vision.sys, "platform", "darwin")
+    monkeypatch.setitem(sys.modules, "Vision", fake)
+    monkeypatch.setitem(sys.modules, "Quartz", type(sys)("Quartz"))
+    with pytest.raises(AppleVisionUnavailable, match="VNDetectHumanBodyPoseRequest"):
+        apple_vision._import_backend()
