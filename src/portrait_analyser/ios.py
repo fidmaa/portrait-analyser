@@ -9,14 +9,53 @@ from . import const
 from .exceptions import ExifValidationFailed, NoDepthMapFound, UnknownExtension
 from .face import (
     TEETH_MEASUREMENT_MIN_HEIGHT_FRACTION,
-    find_bounding_box_teeth,
+    detect_teeth_arches,
     find_incisor_centroids,
     find_incisor_distance_teeth,
     IncisorMeasurement,
     sample_depth_at_point,
     teeth_threshold,
 )
-from .incisor import compute_incisor_distance_3d
+from .incisor import compute_incisor_distance_3d, depth_raw_to_distance_cm
+
+# Value used to test the binary teeth mask image (teeth 255, background 0).
+MASK_ON = 128
+
+# Facing incisal edges lie roughly in one coronal plane (overjet and head tilt
+# give a few mm, <= ~1.1 cm on the labelled data).  A weak arch whose edge
+# depth is further than this from the strong arch's was sampled on the
+# depth discontinuity into the mouth cavity (seen at ~5.6 cm on real
+# captures): the TrueDepth map does not resolve the thin, barely visible
+# teeth, so the strong arch's depth is used for both edges instead.
+MAX_INCISAL_DEPTH_DIFFERENCE_CM = 2.0
+
+
+def _reconcile_weak_arch_depth(upper_raw, lower_raw, weak_side, float_min, float_max):
+    """Return ``(upper_raw, lower_raw, depth_assumed_side)``.
+
+    When the weak arch's depth sample disagrees implausibly with the strong
+    arch's, replace it with the strong arch's sample and report which side's
+    depth was assumed.  Otherwise return the samples unchanged.
+    """
+    if (
+        weak_side is None
+        or upper_raw is None
+        or lower_raw is None
+        or float_min is None
+        or float_max is None
+    ):
+        return upper_raw, lower_raw, None
+    upper_cm = depth_raw_to_distance_cm(upper_raw, float(float_min), float(float_max))
+    lower_cm = depth_raw_to_distance_cm(lower_raw, float(float_min), float(float_max))
+    if (
+        upper_cm is not None
+        and lower_cm is not None
+        and abs(upper_cm - lower_cm) <= MAX_INCISAL_DEPTH_DIFFERENCE_CM
+    ):
+        return upper_raw, lower_raw, None
+    if weak_side == "upper":
+        return lower_raw, lower_raw, "upper"
+    return upper_raw, upper_raw, "lower"
 
 
 class IOSPortrait:
@@ -34,6 +73,7 @@ class IOSPortrait:
         incisor_distance_3d_mm=None,
         incisor_measurement=None,
         teeth_threshold=None,
+        teeth_arches=None,
     ):
         self.photo = photo
         self.depthmap = depthmap
@@ -47,6 +87,8 @@ class IOSPortrait:
         # Adaptive teeth-matte confidence threshold used for the detection
         # (pixels >= this value were treated as teeth), or None without matte.
         self.teeth_threshold = teeth_threshold
+        # TeethArches (binary teeth mask, weak-arch side/threshold) or None.
+        self.teeth_arches = teeth_arches
         self.floatValueMin = float(floatValueMin) if floatValueMin is not None else None
         self.floatValueMax = float(floatValueMax) if floatValueMax is not None else None
 
@@ -172,6 +214,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
     incisor_distance_3d_mm = None
     incisor_measurement = None
     teeth_cutoff = None
+    teeth_arches = None
     if teeth_image is not None:
         teeth_image = teeth_image.resize(picture_image.size)
 
@@ -185,16 +228,20 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         draw.rectangle([0, 0, border - 1, th - 1], fill=0)          # left
         draw.rectangle([tw - border, 0, tw - 1, th - 1], fill=0)    # right
 
-        # One per-matte threshold for every teeth step (bbox, legacy distance,
-        # incisal edges and depth support), adapted to the matte's gain.
+        # Per-matte adaptive threshold for the strong arch(es), plus a weak
+        # opposite arch with its own threshold.  The resulting binary teeth
+        # mask drives every later step (bbox, legacy distance, incisal edges
+        # and depth support), so the weak arch's edge comes from its own mask.
         teeth_cutoff = teeth_threshold(teeth_image)
-        # The matte is integer-valued, so ``> cutoff - 1`` is ``>= cutoff``.
-        teeth_bbox = find_bounding_box_teeth(teeth_image, min_value=teeth_cutoff - 1)
+        teeth_arches = detect_teeth_arches(teeth_image, threshold=teeth_cutoff)
+        if teeth_arches is not None:
+            teeth_bbox = teeth_arches.bbox
+            teeth_mask = teeth_arches.mask_image()
         if teeth_bbox is not None and teeth_bbox[3] >= round(
             teeth_image.size[1] * TEETH_MEASUREMENT_MIN_HEIGHT_FRACTION
         ):
             incisor_distance = find_incisor_distance_teeth(
-                teeth_image, teeth_bbox, threshold=teeth_cutoff
+                teeth_mask, teeth_bbox, threshold=MASK_ON
             )
 
             # 3D distance for legacy edge-of-gap points
@@ -213,8 +260,8 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                     ly1,
                     photo_w,
                     photo_h,
-                    support_mask=teeth_image,
-                    support_threshold=teeth_cutoff,
+                    support_mask=teeth_mask,
+                    support_threshold=MASK_ON,
                     inward_y=-1,
                 )
                 ld_lower = sample_depth_at_point(
@@ -223,9 +270,12 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                     ly2,
                     photo_w,
                     photo_h,
-                    support_mask=teeth_image,
-                    support_threshold=teeth_cutoff,
+                    support_mask=teeth_mask,
+                    support_threshold=MASK_ON,
                     inward_y=1,
+                )
+                ld_upper, ld_lower, _ = _reconcile_weak_arch_depth(
+                    ld_upper, ld_lower, teeth_arches.weak_side, float_min, float_max
                 )
                 if ld_upper is not None and ld_lower is not None:
                     legacy_3d = compute_incisor_distance_3d(
@@ -243,7 +293,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
 
             # Centroid-based measurement with depth integration
             centroids = find_incisor_centroids(
-                teeth_image, teeth_bbox, threshold=teeth_cutoff
+                teeth_mask, teeth_bbox, threshold=MASK_ON
             )
             if centroids is not None:
                 upper_c, lower_c = centroids
@@ -254,6 +304,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                 upper_distance_cm = None
                 lower_distance_cm = None
                 distance_3d_mm = None
+                depth_assumed = None
 
                 if depth_image is not None:
                     photo_w, photo_h = picture_image.size
@@ -263,8 +314,8 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                         upper_c[1],
                         photo_w,
                         photo_h,
-                        support_mask=teeth_image,
-                    support_threshold=teeth_cutoff,
+                        support_mask=teeth_mask,
+                        support_threshold=MASK_ON,
                         inward_y=-1,
                     )
                     lower_depth_raw = sample_depth_at_point(
@@ -273,9 +324,18 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                         lower_c[1],
                         photo_w,
                         photo_h,
-                        support_mask=teeth_image,
-                    support_threshold=teeth_cutoff,
+                        support_mask=teeth_mask,
+                        support_threshold=MASK_ON,
                         inward_y=1,
+                    )
+                    upper_depth_raw, lower_depth_raw, depth_assumed = (
+                        _reconcile_weak_arch_depth(
+                            upper_depth_raw,
+                            lower_depth_raw,
+                            teeth_arches.weak_side,
+                            float_min,
+                            float_max,
+                        )
                     )
 
                     if (
@@ -308,6 +368,8 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                     lower_distance_cm=lower_distance_cm,
                     distance_3d_mm=distance_3d_mm,
                     pixel_distance_y=pixel_dist_y,
+                    weak_arch=teeth_arches.weak_side,
+                    depth_assumed=depth_assumed,
                 )
 
     # Process skin map: resize
@@ -331,6 +393,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         incisor_distance_3d_mm=incisor_distance_3d_mm,
         incisor_measurement=incisor_measurement,
         teeth_threshold=teeth_cutoff,
+        teeth_arches=teeth_arches,
     )
 
 

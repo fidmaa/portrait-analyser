@@ -12,24 +12,29 @@ from PIL import Image
 
 from portrait_analyser import face
 from portrait_analyser.face import (
+    detect_teeth_arches,
     find_bounding_box_teeth,
     find_incisor_centroids,
     find_incisor_distance_teeth,
     sample_depth_at_point,
     teeth_threshold,
 )
+from portrait_analyser.ios import _reconcile_weak_arch_depth
 
 WIDTH, HEIGHT = 600, 800
-# Upper incisors (rows 300-329) and lower incisors (rows 480-509), x 250-349.
+# Upper incisors (rows 300-329) and lower incisors (rows 420-449), x 250-349.
 UPPER_ROWS = (300, 330)
-LOWER_ROWS = (480, 510)
+LOWER_ROWS = (420, 450)
 TEETH_COLS = (250, 350)
 
 
 def _halo(arr, value=30):
-    """Draw a faint elliptical mouth contour like Apple's lip halo."""
+    """Draw a faint elliptical mouth contour like Apple's lip halo.
+
+    As on real mattes, its top and bottom run through the two arches.
+    """
     yy, xx = numpy.mgrid[0:HEIGHT, 0:WIDTH]
-    r = ((xx - 300) / 120.0) ** 2 + ((yy - 405) / 130.0) ** 2
+    r = ((xx - 300) / 120.0) ** 2 + ((yy - 375) / 75.0) ** 2
     arr[(r > 0.85) & (r < 1.15)] = value
     return arr
 
@@ -118,7 +123,7 @@ class TestWeakMatteDetected:
         assert LOWER_ROWS[0] <= legacy[3] < LOWER_ROWS[0] + 1
 
     def test_single_weak_arch_gets_a_bounding_box(self):
-        arr = numpy.array(_open_mouth(upper=100, lower=0))
+        arr = numpy.array(_open_mouth(upper=100, lower=0, halo=0))
         bbox = find_bounding_box_teeth(Image.fromarray(arr))
         assert bbox is not None
         assert bbox[1] == UPPER_ROWS[0]
@@ -187,7 +192,12 @@ class TestNoiseRejected:
 
 class TestExplicitThresholdsUnchanged:
     def test_explicit_bbox_arguments_match_legacy_implementation(self):
-        img = _open_mouth(upper=230, lower=210, halo=150)
+        # The legacy code needs a >= 200 px tall box, so use a taller mouth.
+        arr = numpy.zeros((HEIGHT, WIDTH), dtype=numpy.uint8)
+        arr[250:600, 180:420] = 150  # sub-threshold soft tissue
+        arr[250:280, 250:350] = 230
+        arr[480:510, 240:360] = 210
+        img = Image.fromarray(arr)
         expected = _legacy_bounding_box(img, 100, 100, 200)
         assert expected is not None
         assert find_bounding_box_teeth(img, 100, 100, 200) == expected
@@ -207,8 +217,96 @@ class TestExplicitThresholdsUnchanged:
 
     def test_explicit_threshold_ignores_weaker_teeth(self):
         img = _open_mouth(upper=255, lower=150)
-        bbox = (200, 280, 200, 250)
+        bbox = (200, 280, 200, 190)
         assert find_incisor_centroids(img, bbox, threshold=200) is None
         assert find_incisor_distance_teeth(img, bbox, threshold=200) is None
         assert find_incisor_centroids(img, bbox, threshold=150) is not None
         assert find_incisor_distance_teeth(img, bbox, threshold=150) is not None
+
+
+class TestWeakArch:
+    """One arch at full confidence, the opposite one faint, zero gap between."""
+
+    def test_weak_upper_arch_across_zero_gap(self):
+        img = _open_mouth(upper=25, lower=255, halo=0)
+        arches = detect_teeth_arches(img)
+        assert arches is not None
+        assert arches.weak_side == "upper"
+        assert arches.weak_threshold < arches.threshold
+        assert arches.bbox[1] == UPPER_ROWS[0]
+        assert arches.bbox[1] + arches.bbox[3] == LOWER_ROWS[1] - 1
+        assert find_bounding_box_teeth(img) == arches.bbox
+
+        # The weak arch's incisal edge comes from the weak-arch mask.
+        centroids = find_incisor_centroids(arches.mask_image(), arches.bbox, threshold=128)
+        assert centroids is not None
+        upper, lower = centroids
+        assert upper[1] == UPPER_ROWS[1] - 1
+        assert lower[1] == LOWER_ROWS[0]
+
+    def test_weak_lower_arch_across_zero_gap(self):
+        img = _open_mouth(upper=255, lower=22, halo=0)
+        arches = detect_teeth_arches(img)
+        assert arches is not None
+        assert arches.weak_side == "lower"
+        assert arches.bbox[1] == UPPER_ROWS[0]
+        assert arches.bbox[1] + arches.bbox[3] == LOWER_ROWS[1] - 1
+
+    def test_strong_arch_skirt_is_not_a_weak_arch(self):
+        """Faint values touching the strong arch are its soft edge, not teeth."""
+        arr = numpy.array(_open_mouth(upper=0, lower=255, halo=0))
+        arr[LOWER_ROWS[0] - 60 : LOWER_ROWS[0], TEETH_COLS[0] : TEETH_COLS[1]] = 25
+        arches = detect_teeth_arches(Image.fromarray(arr))
+        assert arches is not None
+        assert arches.weak_side is None
+        assert arches.bbox[1] == LOWER_ROWS[0]
+
+    def test_tiny_or_narrow_faint_blob_is_not_a_weak_arch(self):
+        arr = numpy.array(_open_mouth(upper=0, lower=255, halo=0))
+        arr[300:303, 298:302] = 25  # 12 px speck in the mouth gap
+        arches = detect_teeth_arches(Image.fromarray(arr))
+        assert arches.weak_side is None
+
+    def test_faint_blob_without_strong_arch_is_rejected(self):
+        arr = numpy.zeros((HEIGHT, WIDTH), dtype=numpy.uint8)
+        arr[UPPER_ROWS[0] : UPPER_ROWS[1], TEETH_COLS[0] : TEETH_COLS[1]] = 25
+        img = Image.fromarray(arr)
+        assert detect_teeth_arches(img) is None
+        assert find_bounding_box_teeth(img) is None
+
+    def test_explicit_threshold_does_not_search_weak_arch(self):
+        img = _open_mouth(upper=25, lower=255, halo=0)
+        bbox = find_bounding_box_teeth(img, min_value=200)
+        assert bbox[1] == LOWER_ROWS[0]
+        assert detect_teeth_arches(img, find_weak_arch=False).weak_side is None
+
+
+class TestWeakArchDepth:
+    # float_min/max chosen so raw 230 -> ~29.7 cm and raw 186 -> ~36 cm.
+    FMIN, FMAX = 1.0, 3.5
+
+    def test_plausible_depths_kept(self):
+        assert _reconcile_weak_arch_depth(230, 226, "upper", self.FMIN, self.FMAX) == (
+            230,
+            226,
+            None,
+        )
+
+    def test_weak_edge_in_cavity_uses_strong_depth(self):
+        assert _reconcile_weak_arch_depth(186, 233, "upper", self.FMIN, self.FMAX) == (
+            233,
+            233,
+            "upper",
+        )
+        assert _reconcile_weak_arch_depth(233, 150, "lower", self.FMIN, self.FMAX) == (
+            233,
+            233,
+            "lower",
+        )
+
+    def test_no_weak_arch_leaves_depths_alone(self):
+        assert _reconcile_weak_arch_depth(186, 233, None, self.FMIN, self.FMAX) == (
+            186,
+            233,
+            None,
+        )

@@ -20,6 +20,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `teeth_threshold()`: adaptive per-matte confidence threshold for Apple's
   semantic teeth matte (half of the matte's robust peak, clipped to
   `[64, 200]`), and `IOSPortrait.teeth_threshold` recording the value used.
+- `detect_teeth_arches()` / `TeethArches`: per-arch teeth detection that also
+  finds a weak opposite arch (Apple often gives one arch only ~10-35
+  confidence) across the mouth gap with its own threshold.
+  `IOSPortrait.teeth_arches`, and `IncisorMeasurement.weak_arch` /
+  `depth_assumed` flags.
 
 ### Changed
 
@@ -36,6 +41,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   now yields a bounding box. `load_image()` only runs the incisor measurements
   when the box is at least 6.5 % of the matte height (the old 200 px), so a
   single arch is never measured as a mouth opening.
+- `load_image()` measures incisors on the per-arch teeth mask, so photos with
+  one faint arch are measured too. When the faint arch's edge depth lies
+  more than 2 cm from the other arch's (the depth map resolves the mouth
+  cavity, not the barely visible teeth), the other arch's depth is used for
+  both edges and `depth_assumed` says so.
 - `pose` diagnostic chatter ("Mouth open ratio") now goes to stderr instead of
   stdout, so it cannot corrupt a caller's machine-readable output.
 

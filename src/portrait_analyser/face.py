@@ -21,6 +21,11 @@ class IncisorMeasurement:
     lower_distance_cm: float | None = None
     distance_3d_mm: float | None = None  # 3D Euclidean distance between centroids
     pixel_distance_y: float = 0.0  # legacy-style vertical pixel gap
+    # "upper"/"lower" when that arch was found only as a weak matte blob.
+    weak_arch: str | None = None
+    # "upper"/"lower" when that edge's depth was implausible and the other
+    # arch's depth was used for it (coplanar incisal edges assumed).
+    depth_assumed: str | None = None
 
 
 _FACE_MODEL_URL = (
@@ -683,6 +688,18 @@ TEETH_BBOX_COMPONENT_FRACTION = 0.1
 # mistaken for the gap between upper and lower incisors.
 TEETH_MEASUREMENT_MIN_HEIGHT_FRACTION = 0.065
 
+# Weak opposite arch (see ``_find_weak_arch``).  On real mattes the weak arch
+# peaks at ~20-35 on a background of exactly 0, while noise stays <= ~5.
+TEETH_WEAK_ARCH_SEARCH_FRACTION = 0.2  # search reach, fraction of height
+TEETH_WEAK_ARCH_MIN_GAP_FRACTION = 0.01  # min empty gap, fraction of height
+TEETH_WEAK_ARCH_GAP_FILL = 0.02  # max share of weak pixels in a "gap" row
+TEETH_WEAK_ARCH_PEAK_FRACTION = 0.5
+TEETH_WEAK_ARCH_FLOOR = 8
+TEETH_WEAK_ARCH_MIN_PEAK = 15
+TEETH_WEAK_ARCH_MIN_WIDTH_FRACTION = 0.3  # of the searched central columns
+TEETH_WEAK_ARCH_CENTRAL_FRACTION = 0.5  # searched share of strong-arch columns
+TEETH_WEAK_ARCH_MIN_AREA_FRACTION = 1.5e-5  # of the image area (~107 px)
+
 
 def _teeth_array(teethmap):
     """Return the teeth matte as a 2-D numpy array (first channel if RGB)."""
@@ -730,10 +747,214 @@ def _resolve_threshold(teethmap, threshold):
     return teeth_threshold(teethmap) if threshold is None else threshold
 
 
+@dataclass
+class TeethArches:
+    """Teeth found in the Apple teeth matte, possibly with one weak arch.
+
+    ``mask`` is a boolean array (matte shape) of all teeth pixels: the strong
+    arch(es) found with ``threshold`` plus, when ``weak_side`` is set, a weak
+    opposite arch found with its own ``weak_threshold``.  ``bbox`` is
+    ``(x, y, width, height)`` of ``mask``.
+    """
+
+    mask: numpy.ndarray
+    bbox: tuple[int, int, int, int]
+    threshold: int
+    weak_threshold: int | None = None
+    weak_side: str | None = None  # "upper", "lower" or None
+
+    def mask_image(self) -> Image.Image:
+        """``mask`` as an L-mode image (teeth 255, background 0)."""
+        return Image.fromarray(self.mask.astype(numpy.uint8) * 255)
+
+
 def _margin(value, size):
     if value is None:
         return round(size * TEETH_BBOX_MARGIN_FRACTION)
     return int(value)
+
+
+def _mask_bbox(mask):
+    rows = numpy.flatnonzero(mask.any(axis=1))
+    cols = numpy.flatnonzero(mask.any(axis=0))
+    return int(cols[0]), int(rows[0]), int(cols[-1]), int(rows[-1])
+
+
+def _significant_components(mask):
+    """Drop speckle: keep components >= TEETH_BBOX_COMPONENT_FRACTION of the largest."""
+    import cv2
+
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(
+        mask.astype(numpy.uint8), connectivity=8
+    )
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    if areas.size == 0:
+        return numpy.zeros_like(mask, dtype=bool)
+    keep = numpy.flatnonzero(areas >= TEETH_BBOX_COMPONENT_FRACTION * areas.max()) + 1
+    return numpy.isin(labels, keep)
+
+
+def _thresholded_teeth(arr, mask, margin_x, margin_y, min_height, min_area):
+    """Apply margins, speckle removal and sanity limits to a teeth mask.
+
+    Returns ``(kept_mask, (x0, y0, x1, y1))`` or ``None``.
+    """
+    height, width = arr.shape
+    mx = _margin(margin_x, width)
+    my = _margin(margin_y, height)
+    if min_height is None:
+        min_height = max(1, round(height * TEETH_BBOX_MIN_HEIGHT_FRACTION))
+    if min_area is None:
+        min_area = max(1, round(height * width * TEETH_BBOX_MIN_AREA_FRACTION))
+
+    roi = numpy.zeros_like(mask, dtype=bool)
+    roi[my : height - my, mx : width - mx] = True
+    mask = mask & roi
+    if not mask.any():
+        return None
+
+    kept = _significant_components(mask)
+    if int(numpy.count_nonzero(kept)) < min_area:
+        return None
+
+    x0, y0, x1, y1 = _mask_bbox(kept)
+    if y1 == height - my - 1:
+        # Teeth reach the bottom margin: the matte is cut off, reject.
+        return None
+    if y1 - y0 < min_height:
+        return None
+    return kept, (x0, y0, x1, y1)
+
+
+def _find_weak_arch(arr, strong, strong_box, side):
+    """Look for a weak arch across a near-empty gap from the strong arch.
+
+    Apple's matte frequently gives one arch full confidence and the opposite
+    one only ~10-35.  That weak arch is still a separate blob on a zero
+    background, split from the strong arch by the dark mouth cavity.  The
+    search runs in the central columns of the strong arch (so the faint lip
+    contour at the mouth corners cannot bridge the two arches), on ``side``
+    ("upper"/"lower") of it, with a threshold relative to that side's own
+    robust peak.  Weak-level blobs connected to the strong arch are its soft
+    skirt and are ignored; what remains must be sizeable, wide enough and
+    separated from the strong arch by a real gap.
+
+    Returns ``(weak_mask, weak_threshold)`` (full-size mask) or ``None``.
+    """
+    import cv2
+
+    height, width = arr.shape
+    x0, y0, x1, y1 = strong_box
+    strong_width = x1 - x0 + 1
+    c0 = x0 + round(strong_width * (1 - TEETH_WEAK_ARCH_CENTRAL_FRACTION) / 2)
+    c1 = max(c0 + 1, x1 + 1 - round(strong_width * (1 - TEETH_WEAK_ARCH_CENTRAL_FRACTION) / 2))
+    reach = round(height * TEETH_WEAK_ARCH_SEARCH_FRACTION)
+    min_gap = max(2, round(height * TEETH_WEAK_ARCH_MIN_GAP_FRACTION))
+    my = _margin(None, height)
+    if side == "upper":
+        side_top, side_bottom = max(my, y0 - reach), y0  # rows [top, bottom)
+    else:
+        side_top, side_bottom = y1 + 1, min(height - my, y1 + 1 + reach)
+    if side_bottom - side_top <= min_gap:
+        return None
+
+    side_values = arr[side_top:side_bottom, c0:c1]
+    values = side_values[side_values > 0]
+    if values.size == 0:
+        return None
+    peak = float(numpy.percentile(values, 99))
+    if peak < TEETH_WEAK_ARCH_MIN_PEAK:
+        return None
+    weak_threshold = max(TEETH_WEAK_ARCH_FLOOR, round(peak * TEETH_WEAK_ARCH_PEAK_FRACTION))
+
+    # Label weak-level pixels over the side window *and* the strong arch rows,
+    # so blobs touching the strong arch can be recognised and dropped.
+    top = min(side_top, y0)
+    bottom = max(side_bottom, y1 + 1)
+    window = arr[top:bottom, c0:c1]
+    strong_window = strong[top:bottom, c0:c1]
+    level = (window >= weak_threshold) | strong_window
+    _, labels = cv2.connectedComponents(level.astype(numpy.uint8), connectivity=8)
+    skirt_labels = numpy.unique(labels[strong_window])
+    candidate = level & ~numpy.isin(labels, skirt_labels)
+    if side == "upper":
+        candidate[y0 - top :] = False
+    else:
+        candidate[: y1 + 1 - top] = False
+    if not candidate.any():
+        return None
+    weak = _significant_components(candidate)
+
+    min_area = max(1, round(height * width * TEETH_WEAK_ARCH_MIN_AREA_FRACTION))
+    if int(numpy.count_nonzero(weak)) < min_area:
+        return None
+    wx0, wy0, wx1, wy1 = _mask_bbox(weak)
+    if wx1 - wx0 + 1 < TEETH_WEAK_ARCH_MIN_WIDTH_FRACTION * (c1 - c0):
+        return None
+
+    # Real gap: a run of rows with ~no weak-level signal between the weak
+    # arch's facing edge and the strong arch's skirt.
+    if side == "upper":
+        span = level[wy1 + 1 : y0 - top]
+    else:
+        span = level[y1 + 1 - top : wy0]
+    empty_rows = numpy.count_nonzero(span, axis=1) <= TEETH_WEAK_ARCH_GAP_FILL * (c1 - c0)
+    longest = max((end - start for start, end in _true_runs(empty_rows)), default=0)
+    if longest < min_gap:
+        return None
+
+    full = numpy.zeros_like(strong, dtype=bool)
+    full[top:bottom, c0:c1] = weak
+    return full, int(weak_threshold)
+
+
+def detect_teeth_arches(
+    teethmap,
+    threshold=None,
+    margin_x=None,
+    margin_y=None,
+    min_height=None,
+    min_area=None,
+    find_weak_arch=True,
+) -> TeethArches | None:
+    """Detect teeth in the Apple teeth matte, per arch.
+
+    Strong teeth are pixels ``>= threshold`` (default :func:`teeth_threshold`).
+    When they form a single arch (box shorter than
+    ``TEETH_MEASUREMENT_MIN_HEIGHT_FRACTION`` of the height) and
+    ``find_weak_arch`` is true, the opposite arch is searched for across the
+    mouth gap with its own, lower threshold -- upper side first, as a weak
+    upper arch is the common case.  A weak blob on its own never produces a
+    detection: a strong arch must be present first.
+    """
+    arr = _teeth_array(teethmap)
+    if threshold is None:
+        threshold = teeth_threshold(arr)
+    found = _thresholded_teeth(arr, arr >= threshold, margin_x, margin_y, min_height, min_area)
+    if found is None:
+        return None
+    mask, (x0, y0, x1, y1) = found
+    weak_threshold = None
+    weak_side = None
+
+    height = arr.shape[0]
+    if find_weak_arch and y1 - y0 < round(height * TEETH_MEASUREMENT_MIN_HEIGHT_FRACTION):
+        for side in ("upper", "lower"):
+            weak = _find_weak_arch(arr, mask, (x0, y0, x1, y1), side)
+            if weak is not None:
+                weak_mask, weak_threshold = weak
+                mask = mask | weak_mask
+                weak_side = side
+                x0, y0, x1, y1 = _mask_bbox(mask)
+                break
+
+    return TeethArches(
+        mask=mask,
+        bbox=(x0, y0, x1 - x0, y1 - y0),
+        threshold=int(threshold),
+        weak_threshold=weak_threshold,
+        weak_side=weak_side,
+    )
 
 
 def find_bounding_box_teeth(
@@ -746,9 +967,10 @@ def find_bounding_box_teeth(
 ):
     """Return the teeth bounding box ``(x, y, width, height)`` or ``None``.
 
-    ``min_value=None`` (default) uses :func:`teeth_threshold` and treats pixels
-    ``>= threshold`` as teeth; an explicit ``min_value`` keeps the historical
-    strict ``> min_value`` comparison.  Margins default to
+    ``min_value=None`` (default) uses :func:`detect_teeth_arches`: adaptive
+    threshold (pixels ``>= threshold``) plus a weak opposite arch when one is
+    present.  An explicit ``min_value`` keeps the historical single strict
+    ``> min_value`` comparison and no weak-arch search.  Margins default to
     ``TEETH_BBOX_MARGIN_FRACTION`` of the matte size.  Only connected
     components at least ``TEETH_BBOX_COMPONENT_FRACTION`` of the largest one
     contribute to the box, so isolated speckles cannot inflate it.  ``None``
@@ -756,51 +978,21 @@ def find_bounding_box_teeth(
     box is shorter than ``min_height`` or the teeth cover fewer than
     ``min_area`` pixels (both default to fractions of the matte size).
     """
-    arr = _teeth_array(teethmap)
-    height, width = arr.shape
-    mx = _margin(margin_x, width)
-    my = _margin(margin_y, height)
-    if min_height is None:
-        min_height = max(1, round(height * TEETH_BBOX_MIN_HEIGHT_FRACTION))
-    if min_area is None:
-        min_area = max(1, round(height * width * TEETH_BBOX_MIN_AREA_FRACTION))
-
     if min_value is None:
-        mask = arr >= teeth_threshold(arr)
-    else:
-        mask = arr > min_value
+        arches = detect_teeth_arches(
+            teethmap,
+            margin_x=margin_x,
+            margin_y=margin_y,
+            min_height=min_height,
+            min_area=min_area,
+        )
+        return None if arches is None else arches.bbox
 
-    roi = numpy.zeros_like(mask)
-    roi[my : height - my, mx : width - mx] = True
-    mask &= roi
-    if not mask.any():
+    arr = _teeth_array(teethmap)
+    found = _thresholded_teeth(arr, arr > min_value, margin_x, margin_y, min_height, min_area)
+    if found is None:
         return None
-
-    import cv2
-
-    _, _, stats, _ = cv2.connectedComponentsWithStats(
-        mask.astype(numpy.uint8), connectivity=8
-    )
-    areas = stats[1:, cv2.CC_STAT_AREA]
-    keep_labels = numpy.flatnonzero(
-        areas >= TEETH_BBOX_COMPONENT_FRACTION * areas.max()
-    ) + 1
-    kept = stats[keep_labels]
-    if int(kept[:, cv2.CC_STAT_AREA].sum()) < min_area:
-        return None
-
-    x0 = int(kept[:, cv2.CC_STAT_LEFT].min())
-    y0 = int(kept[:, cv2.CC_STAT_TOP].min())
-    x1 = int((kept[:, cv2.CC_STAT_LEFT] + kept[:, cv2.CC_STAT_WIDTH]).max()) - 1
-    y1 = int((kept[:, cv2.CC_STAT_TOP] + kept[:, cv2.CC_STAT_HEIGHT]).max()) - 1
-
-    if y1 == height - my - 1:
-        # Teeth reach the bottom margin: the matte is cut off, reject.
-        return None
-
-    if y1 - y0 < min_height:
-        return None
-
+    _, (x0, y0, x1, y1) = found
     return (x0, y0, x1 - x0, y1 - y0)
 
 
