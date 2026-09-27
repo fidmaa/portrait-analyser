@@ -97,6 +97,9 @@ def _reconcile_weak_arch_samples(upper, lower, weak_side, calibrated=True):
     return upper, upper, "lower"
 
 
+_NOT_COMPUTED = object()
+
+
 class IOSPortrait:
     """A loaded portrait photo with its depth map and semantic mattes.
 
@@ -192,6 +195,8 @@ class IOSPortrait:
         # capture-app depth that failed the plausibility check), else None.
         self.depth_repair_check = depth_repair_check
         self._depth = depth
+        # measure_neck_width result, computed on first access of neck_width.
+        self._neck_width = _NOT_COMPUTED
 
     @property
     def depth(self):
@@ -221,6 +226,29 @@ class IOSPortrait:
     @depth.setter
     def depth(self, value):
         self._depth = value
+
+    @property
+    def neck_width(self):
+        """Automatic neck width (:class:`~portrait_analyser.neck_width.NeckWidthResult`),
+        or None for Camera-app (legacy) files.
+
+        Computed on first access and cached, so ``load_image`` time and
+        legacy outputs are unchanged. The first access runs MediaPipe
+        FaceMesh (about 1.5 s cold, when its model is loaded; ~0.03 s after)
+        and, on macOS, Apple Vision body pose (~0.5 s for the first request
+        in a process, ~0.04 s after). See
+        :func:`~portrait_analyser.neck_width.measure_neck_width`; call that
+        directly to pass landmarks, a body pose or intrinsics.
+        """
+        if self._neck_width is _NOT_COMPUTED:
+            from .neck_width import measure_neck_width
+
+            self._neck_width = measure_neck_width(self)
+        return self._neck_width
+
+    @neck_width.setter
+    def neck_width(self, value):
+        self._neck_width = value
 
     @property
     def depth_code_zero_is_invalid(self):

@@ -39,6 +39,7 @@ dependencies = [
     "pyheif>=0.7.1; sys_platform == 'linux'",
     "pyobjc-framework-quartz>=12.2 ; sys_platform == 'darwin'",
     "pyobjc-framework-avfoundation>=12.2 ; sys_platform == 'darwin'",
+    "pyobjc-framework-vision>=12.2 ; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]

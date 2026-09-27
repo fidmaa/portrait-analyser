@@ -153,3 +153,14 @@ def test_depth_keyword_matches_golden(name):
     )
     pts = list(sample_points_along_line(cx - 200, cy, cx + 200, cy + 50, 5))
     assert repr(depth.median_filtered().surface_length_mm(pts)) == golden["surface_centre"]
+
+
+@pytest.mark.parametrize("name", sorted(GOLDEN))
+def test_neck_width_is_none_and_leaves_legacy_outputs_alone(name):
+    """Camera-app files get no width-based neck measurement, and the legacy
+    outputs stay golden with the neck_width module loaded and accessed."""
+    path = Path(__file__).parent / name
+    p = pa.load_image(str(path))
+    assert p.neck_width is None
+    assert pa.measure_neck_width(p) is None
+    assert legacy_outputs(path) == GOLDEN[name]

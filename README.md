@@ -171,6 +171,15 @@ Both extend `Rectangle` (attributes: `x`, `y`, `width`, `height`, `center_x`, `c
 - `NeckMeasurement` -- dataclass with stable `left_x`, `right_x` sampling coordinates, original `mask_left_x`, `mask_right_x` silhouette coordinates, `neck_y`, `arc_points_3d` (physical mm coordinates), `arc_points_photo` (pixel coordinates, for overlay painting), the surface-polyline `front_arc_length_mm`, and its direct Euclidean `front_chord_length_mm`.
 - Within an explicit MediaPipe search band, neck-row selection median-smooths the skin-width profile and chooses the first prominent local minimum rather than a later global minimum caused by a collar or shoulder matte dropout.
 
+### Neck width (`neck_width` module — TrueDepth capture-app photos)
+
+For capture-app files (float depth + file intrinsics) only; Camera-app files return `None` and keep the detectors above.
+
+- `measure_neck_width(portrait, *, face_mesh=None, body_pose=None, camera=None, use_vision=True) -> NeckWidthResult | None` -- neck width just below the jaw: per row between the chin (FaceMesh 152) and Apple Vision's neck joint (macOS; otherwise 6 cm below the chin), the outer skin-matte edges around the facial midline, rejected when the depth just outside an edge is nearer than inside (collar), the edge is oblique (collar V), off the midline, or the two edges' depths disagree. Width = median 3-D distance over the topmost run of clean rows (at least 3), each edge's depth read 3 mm inside it. `portrait.neck_width` computes it lazily on first access.
+- `neck_width_from_edges(portrait, left_xy, right_xy, *, camera=None) -> NeckWidthResult | None` -- the same width from two clicked edge points (photo px), with the collar warning.
+- `NeckWidthResult` -- `status` (`"ok"`, `"edges-occluded"`, `"no-face"`, `"no-depth"`, `"no-camera"`), `row_y`, `left_x`, `right_x`, `width_mm`, `rows_used`, `band`, `band_source` (`"vision-neck"`, `"chin-offset"`, `"manual"`), `circumference_pi_w_mm` (π·W, upper bound), `circumference_ellipse_mm` (Ramanujan range for b/a 0.85-0.90 -- a population assumption), `warnings`, `message`, `rows` (every evaluated row, for overlays).
+- `detect_body_pose(photo) -> BodyPose | None` -- Apple Vision body pose on a padded canvas (the photo at 1/3 scale; on the full frame Vision finds no one in a close portrait). Raises `AppleVisionUnavailable` off macOS.
+
 ### Pose-invariant local surface landmarks (`local_surface` module)
 
 - `score_local_surface_feature(x, y, z, valid, feature, radial_fraction=None, smoothing_size=5, center_bias=0.15) -> LocalSurfaceScores` -- robustly fits and removes the dominant local 3D plane, median-smooths the residual, then ranks a `SurfaceFeature.PEAK` or `SurfaceFeature.VALLEY`. Lower scores are always better. An optional normalized radial distance weakly favours the user's clicked area without overriding a strong off-centre feature.

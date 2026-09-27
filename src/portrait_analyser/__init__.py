@@ -19,9 +19,12 @@ from .depth_sampling import (
     sample_filtered_depth,
     sample_points_along_line,
 )
+from .apple_vision import BodyPose, detect_body_pose
 from .exceptions import (
     AppleDepthDecodeError,
     AppleDepthUnavailable,
+    AppleVisionError,
+    AppleVisionUnavailable,
     ExifValidationFailed,
     MultipleFacesDetected,
     NoDepthMapFound,
@@ -85,6 +88,14 @@ from .pose import (
     detect_face_mesh,
     detect_neck_midpoint,
 )
+from .neck_width import (
+    NeckWidthResult,
+    NeckWidthRow,
+    circumference_ellipse_range,
+    circumference_pi_w,
+    measure_neck_width,
+    neck_width_from_edges,
+)
 from .ulbt import ULBTDebug, ULBTMeasurement, compute_ulbt_from_facemesh
 from .extended_neck import (
     SegmentationDebug,
@@ -97,6 +108,16 @@ __all__ = [
     "AppleDepthDecodeError",
     "AppleDepthUnavailable",
     "read_apple_depth",
+    "AppleVisionError",
+    "AppleVisionUnavailable",
+    "BodyPose",
+    "detect_body_pose",
+    "NeckWidthResult",
+    "NeckWidthRow",
+    "circumference_ellipse_range",
+    "circumference_pi_w",
+    "measure_neck_width",
+    "neck_width_from_edges",
     "DISPARITY_FAR_CAP_M",
     "encode_depth_as_disparity_8bit",
     "CameraModel",

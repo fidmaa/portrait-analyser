@@ -35,3 +35,12 @@ class AppleDepthDecodeError(Exception):
     auxiliary image at all): this means aux data was present but
     ImageIO/AVFoundation could not turn it into usable depth.
     """
+
+
+class AppleVisionUnavailable(Exception):
+    """Apple Vision cannot run here: not macOS, or pyobjc-framework-Vision /
+    pyobjc-framework-Quartz are not importable."""
+
+
+class AppleVisionError(Exception):
+    """An Apple Vision request failed or returned data of an unexpected shape."""
