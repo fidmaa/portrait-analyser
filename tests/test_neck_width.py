@@ -6,6 +6,7 @@ ray/cylinder intersection, the skin matte from the cylinder's silhouette.
 """
 
 import math
+import re
 import subprocess
 import sys
 
@@ -210,7 +211,8 @@ def test_collar_outside_nearer_is_rejected_with_warning():
     result = measure_neck_width(portrait, face_mesh=face_mesh(), body_pose=body_pose())
     assert result.status == STATUS_EDGES_OCCLUDED
     assert result.width_mm is None and result.circumference_circle_mm is None
-    assert "neck edges not visible" in result.message
+    assert result.message.startswith(neck_width.ADVICE_COLLAR)
+    assert result.reject_counts == {"occluded": len(result.rows)}
     assert any("outside nearer than neck edge (collar?)" in w for w in result.warnings)
     assert result.rows and not any(r.left_ok or r.right_ok for r in result.rows)
 
@@ -257,12 +259,49 @@ def test_oblique_edges_are_rejected():
     assert any("oblique" in w for w in result.warnings)
 
 
-def test_off_midline_edges_are_rejected():
+def _mesh_turned(jaw_shift_px=0.0, chin_shift_px=0.0):
     mesh = face_mesh()
-    left, _ = _silhouette_columns()
-    mesh[152] = (left + 20.0, CHIN_Y)  # "midline" near one edge
+    mesh[152] = (CX + chin_shift_px, CHIN_Y)
+    mesh[172] = (mesh[172][0] + jaw_shift_px, mesh[172][1])
+    mesh[397] = (mesh[397][0] + jaw_shift_px, mesh[397][1])
+    return mesh
+
+
+def _neck_px_per_mm():
+    return FX / _inset_depth_mm()
+
+
+@pytest.mark.parametrize("fraction", [0.05, 0.06, 0.07, 0.08])
+def test_small_head_turn_still_measures(fraction):
+    """A turned head moves the chin ~10 cm in front of the neck axis by 5-8 %
+    of the neck width and the jaw angles by about a third of that: the
+    width is still measured (N1)."""
+    left, right = _silhouette_columns()
+    chin_shift = fraction * (right - left)
+    mesh = _mesh_turned(jaw_shift_px=chin_shift / 3, chin_shift_px=chin_shift)
     result = measure_neck_width(make_portrait(), face_mesh=mesh, body_pose=body_pose())
+    assert result.status == STATUS_OK, result.message
+    assert result.width_mm == pytest.approx(expected_method_width_mm(), rel=0.02)
+
+
+def test_moderate_jaw_offset_lowers_quality():
+    shift = 7.0 * _neck_px_per_mm()  # neck centre 7 mm from the jaw centre
+    result = measure_neck_width(
+        make_portrait(), face_mesh=_mesh_turned(jaw_shift_px=shift), body_pose=body_pose()
+    )
+    assert result.status == STATUS_OK
+    assert result.quality == "low"
+    assert any("off the jaw centre" in r for r in result.quality_reasons)
+
+
+def test_neck_far_off_the_jaw_centre_is_rejected_with_face_the_camera():
+    shift = 15.0 * _neck_px_per_mm()
+    result = measure_neck_width(
+        make_portrait(), face_mesh=_mesh_turned(jaw_shift_px=shift), body_pose=body_pose()
+    )
     assert result.status == STATUS_EDGES_OCCLUDED
+    assert result.message.startswith(neck_width.ADVICE_TURNED)
+    assert any("off-centre" in w for w in result.warnings)
 
 
 def test_chin_offset_band_without_vision_pose():
@@ -468,25 +507,77 @@ def _depth_coords(depth_m):
     return us, vs
 
 
-def test_hand_next_to_the_neck_is_rejected():
-    """Skin (a hand) 25 mm wide against one side, 1 cm nearer than the edge:
-    the outside is background, so only the symmetry / jaw checks catch it."""
+def _hand_portrait(hand_mm=25.0, nearer_mm=10.0):
+    """Skin (a hand) ``hand_mm`` wide against the right side of the neck,
+    ``nearer_mm`` nearer than the neck just inside its edge."""
     base = make_portrait()
     skin = np.asarray(base.skinmap).copy()
     depth = base.depth_m.copy()
     _, right = _silhouette_columns()
     z = _inset_depth_mm()
-    hand_px = 25.0 * FX / z
+    hand_px = hand_mm * FX / z
     skin[int(CHIN_Y) :, int(right) : int(right + hand_px)] = 255
     us, vs = _depth_coords(depth)
     cols = (us >= right) & (us < right + hand_px)
-    depth[np.ix_(vs >= CHIN_Y, cols)] = (z - 10.0) / 1000.0
+    depth[np.ix_(vs >= CHIN_Y, cols)] = (z - nearer_mm) / 1000.0
+    return _with(base, skin=skin, depth_m=depth)
+
+
+def test_hand_next_to_the_neck_is_rejected_with_advice():
+    """The outside of the hand is background, so the occluder test passes;
+    the depth step nearer towards the edge and the off-centre neck catch it,
+    and the user is told why (N3)."""
+    result = measure_neck_width(_hand_portrait(), face_mesh=face_mesh(), body_pose=body_pose())
+    assert result.status == STATUS_EDGES_OCCLUDED
+    assert result.warnings, "a rejection must never be silent"
+    assert result.reject_counts["depth-step"] == len(result.rows)
+    assert any("depth steps nearer towards an edge (hand, collar?)" in w for w in result.warnings)
+    assert result.message.startswith(neck_width.ADVICE_BESIDE)
+
+
+def test_hand_at_the_neck_depth_is_caught_by_the_off_centre_check():
     result = measure_neck_width(
-        _with(base, skin=skin, depth_m=depth), face_mesh=face_mesh(), body_pose=body_pose()
+        _hand_portrait(nearer_mm=0.0), face_mesh=face_mesh(), body_pose=body_pose()
     )
     assert result.status == STATUS_EDGES_OCCLUDED
-    assert any("asymmetric" in r.reject_reason for r in result.rows)
-    assert any("wider than the jaw" in r.reject_reason for r in result.rows)
+    assert "off-centre" in result.reject_counts
+
+
+@pytest.mark.parametrize("ratio", [1.25, 1.4])
+def test_thick_neck_wider_than_the_jaw_is_measured(ratio):
+    """Thick necks (the population screened by neck circumference) may be
+    wider than the FaceMesh jaw: measured, low quality (N2)."""
+    left, right = _silhouette_columns()
+    mesh = face_mesh()
+    half_jaw = (right - left) / ratio / 2
+    mesh[172] = (CX - half_jaw, mesh[172][1])
+    mesh[397] = (CX + half_jaw, mesh[397][1])
+    result = measure_neck_width(make_portrait(), face_mesh=mesh, body_pose=body_pose())
+    assert result.status == STATUS_OK
+    assert result.width_mm == pytest.approx(expected_method_width_mm(), rel=0.02)
+    assert result.quality == "low"
+    assert any("jaw width" in r for r in result.quality_reasons)
+
+
+def test_skin_span_far_wider_than_the_jaw_is_rejected():
+    left, right = _silhouette_columns()
+    mesh = face_mesh()
+    half_jaw = (right - left) / 1.6 / 2
+    mesh[172] = (CX - half_jaw, mesh[172][1])
+    mesh[397] = (CX + half_jaw, mesh[397][1])
+    result = measure_neck_width(make_portrait(), face_mesh=mesh, body_pose=body_pose())
+    assert result.status == STATUS_EDGES_OCCLUDED
+    assert "wider-than-jaw" in result.reject_counts
+    assert result.message.startswith(neck_width.ADVICE_BESIDE)
+
+
+def test_no_neck_rows_advises_distance():
+    portrait = make_portrait()
+    skin = np.asarray(portrait.skinmap).copy()
+    skin[int(CHIN_Y) :] = 0
+    portrait.skinmap = Image.fromarray(skin, "L")
+    result = measure_neck_width(portrait, face_mesh=face_mesh(), body_pose=body_pose())
+    assert result.message.startswith(neck_width.ADVICE_TOO_CLOSE)
 
 
 def test_marginal_collar_is_kept_but_low_quality():
@@ -498,6 +589,8 @@ def test_marginal_collar_is_kept_but_low_quality():
         assert result.status == STATUS_OK
         assert result.quality == "low"
         assert any("collar close to the neck edge" in r for r in result.quality_reasons)
+        # Two decimals: 0.48 must not print as the 0.5 cm rejection limit.
+        assert re.search(r"by up to 0\.\d\d cm", result.quality_reasons[0])
         assert any("collar close to the neck edge" in w for w in result.warnings)
 
 

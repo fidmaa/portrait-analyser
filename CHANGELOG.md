@@ -16,14 +16,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `left_x`, `right_x`, `width_mm`, `rows_used`, `support_mm`,
   `height_below_chin_mm`, `roll_deg`, `neck_roll_deg`, `band`,
   `band_source`, `circumference_circle_mm`, `circumference_ellipse_mm`,
-  `warnings`, `message`, per-row `rows`), or None for Camera-app files.
+  `warnings`, `message`, per-row `rows` with `reject_codes`,
+  `reject_counts`), or None for Camera-app files. An `edges-occluded`
+  message gives the advice for the dominant rejection reason.
   Edges come from the skin matte; the depth only validates them (outside
   nearer than inside by 0.5 cm = collar, rejected; 0.2-0.5 cm = "collar
   close to the neck edge", low quality) and gives each edge's depth 3 mm
-  inside it. Rows with oblique edges (open-collar V), edges off-centre or
-  asymmetric about the facial midline, wider than the FaceMesh jaw (a hand
-  next to the neck) or left/right depths more than 4 cm apart are
-  rejected; the width is the median over the topmost run of clean, stable
+  inside it. Rows with oblique edges (open-collar V), the depth stepping
+  nearer towards an edge or the neck centre more than 10 mm from the
+  FaceMesh jaw centre (a hand beside the neck, a turned head), a span of at
+  least 1.5x the jaw width, or left/right depths more than 4 cm apart are
+  rejected; a neck wider than 1.2x the jaw (thick neck) or 5-10 mm
+  off-centre is measured with low quality; the width is the median over the topmost run of clean, stable
   rows spanning at least 2 mm (low quality below 5 mm), else
   `status="edges-occluded"`. Head or neck roll above 8 degrees warns. The
   band runs from the chin (FaceMesh 152) to Apple Vision's neck joint, or

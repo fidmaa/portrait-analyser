@@ -33,6 +33,14 @@ shirt sit at the neck's depth), so:
   inside it, and the width is the 3-D distance of the two edge points
   (pinhole, file intrinsics).
 
+Effective collar tolerance: an occluder is rejected when it is at least
+:data:`OCCLUDER_MARGIN_CM` nearer than the *inset* depth, and the inset
+point is itself nearer than the true silhouette by some delta (about 0.6 cm
+on IMG_2389's right edge; ~2 cm on an ideal cylinder). So a collar up to
+0.5 cm + delta in front of the true edge passes the rejection; the
+:data:`COLLAR_CLOSE_MARGIN_CM` (0.2 cm) low-quality band flags most of that
+range.
+
 The inside reference for the occluder test is that same inset depth, not the
 depth at the edge itself: on real maps the depth within ~1 mm of the
 silhouette is mixed with whatever lies behind or in front of it (IMG_2389,
@@ -60,10 +68,23 @@ after dropping rows off that run's median by more than
 :data:`WIDTH_STABILITY_TOLERANCE`; the run must span at least
 :data:`MIN_SUPPORT_MM` vertically. Rows are 1 mm apart but each reads depth
 over a ~5-7 mm window, so neighbouring rows are not independent: support is
-stated in mm, not in rows. The slope, midline, symmetry, jaw-width and
-stability thresholds are **provisional heuristics** tuned on eight photos of
+stated in mm, not in rows. The slope, off-centre, depth-step, jaw-width
+and stability thresholds are **provisional heuristics** tuned on eight photos of
 one person; ``quality`` (``"good"``/``"low"`` with reasons) is the outlet for
 borderline cases.
+
+Neck versus things beside it
+----------------------------
+A hand, hair or other skin next to the neck widens the skin span. It is
+caught by (a) the depth stepping *nearer* walking out from the neck centre
+to an edge (:data:`MAX_OUTWARD_DEPTH_STEP_CM`), (b) the neck centre lying
+far from the FaceMesh jaw centre (:data:`MAX_OFFCENTRE_MM`; the jaw angles,
+not the chin, because the chin swings ~10 cm in front of the neck axis with
+every small head turn), and (c) a span of at least :data:`MAX_NECK_TO_JAW`
+times the jaw width. A neck merely wider than the jaw (thick necks) or
+moderately off-centre is *measured* with low quality, not rejected. Every
+rejected row is counted by reason (``reject_counts``, warnings), and an
+``edges-occluded`` message gives the advice for the dominant reason.
 
 Circumference
 -------------
@@ -84,7 +105,7 @@ range 39-40 cm matches that person only because both errors are whatever
 they are on his photos. Treat the circumference as indicative.
 
 Repeatability: on the same person, IMG_2389 gives 134.5 mm and IMG_2363 (a
-collar-limited photo, now rejected by the symmetry check) gave 128.9 mm --
+collar-limited photo) gave 128.9 mm --
 about 4 % between photos, i.e. roughly +-1.6 cm of circumference. The ~1 %
 above is only the row-to-row stability within one photo. Validation:
 IMG_2389 134.5 mm (Vision band); IMG_2386 carries no intrinsics
@@ -129,6 +150,42 @@ BAND_SOURCE_VISION = "vision-neck"
 BAND_SOURCE_CHIN_OFFSET = "chin-offset"
 BAND_SOURCE_MANUAL = "manual"
 
+# Row rejection codes (NeckWidthRow.reject_codes) with the warning label and
+# the advice given when that reason dominates an "edges-occluded" result.
+REJECT_NO_DEPTH = "no-depth"
+REJECT_OCCLUDED = "occluded"
+REJECT_OBLIQUE = "oblique"
+REJECT_NO_SLOPE = "no-slope"
+REJECT_OFFCENTRE = "off-centre"
+REJECT_DEPTH_STEP = "depth-step"
+REJECT_WIDE = "wider-than-jaw"
+REJECT_DEPTH_ASYMMETRY = "depth-asymmetry"
+
+ADVICE_COLLAR = (
+    "neck edges hidden by the collar or beard -- open or lower the collar and include "
+    "the neck below the chin"
+)
+ADVICE_BESIDE = "something next to the neck (hand, hair?) -- keep it away from the neck"
+ADVICE_TURNED = "neck not centred under the face -- face the camera"
+ADVICE_TOO_CLOSE = (
+    "neck edges not visible -- take the photo from further away / include the neck below the chin"
+)
+ADVICE_TOO_FEW = (
+    "too few clean rows below the chin -- take the photo from further away / include more "
+    "of the neck"
+)
+
+REJECT_LABELS = {
+    REJECT_OCCLUDED: ("outside nearer than neck edge (collar?)", ADVICE_COLLAR),
+    REJECT_OBLIQUE: ("oblique edges (collar V / jaw line)", ADVICE_COLLAR),
+    REJECT_DEPTH_STEP: ("depth steps nearer towards an edge (hand, collar?)", ADVICE_BESIDE),
+    REJECT_WIDE: ("skin span much wider than the jaw (skin beside the neck?)", ADVICE_BESIDE),
+    REJECT_OFFCENTRE: ("neck off-centre under the face (head turned or hand?)", ADVICE_TURNED),
+    REJECT_DEPTH_ASYMMETRY: ("left/right edge depths too different", ADVICE_TURNED),
+    REJECT_NO_DEPTH: ("no depth inside an edge", ADVICE_TOO_CLOSE),
+    REJECT_NO_SLOPE: ("no skin edges next to the row (gap)", ADVICE_TOO_CLOSE),
+}
+
 EDGES_OCCLUDED_MESSAGE = (
     "neck edges not visible -- take the photo from further away / include the neck below the chin"
 )
@@ -141,6 +198,10 @@ EDGES_OCCLUDED_MESSAGE = (
 FACE_MESH_CHIN_INDEX = 152
 FACE_MESH_NOSE_INDEX = 1
 FACE_MESH_JAW_INDICES = (172, 397)
+
+# The neck sides lie roughly this far behind the chin (IMG_2389/2386: chin
+# 37 cm, edges 44-45 cm); used to convert mm to px for checks along the neck.
+NECK_BEHIND_CHIN_CM = 8.0
 
 # Rows start this far below the chin (the chin's own outline is not the neck).
 CHIN_CLEARANCE_MM = 6.5
@@ -197,22 +258,33 @@ MAX_EDGE_BEHIND_CHIN_CM = 20.0
 MAX_EDGE_SLOPE = 0.35
 EDGE_SLOPE_BASELINE_MM = 2.0
 
-# Provisional heuristic: the mid-point of the two edges may be off the chin
-# column by at most this fraction of the edge distance.
-MAX_MIDLINE_OFFSET_FRACTION = 0.2
+# Reference for "is the neck under the face": the mid-point of the FaceMesh
+# jaw landmarks (172/397; the chin landmark when they are missing). The jaw
+# angles sit only a few cm in front of the neck axis, so a small head turn
+# moves them far less than the chin (~10 cm in front): a 5 degree turn moves
+# the chin ~9 mm but the jaw mid-point ~3-4 mm. Validation photos: neck
+# centre 1.5-3 mm (IMG_2386/2389) and 6-7 mm (IMG_2363) from it.
+# Provisional heuristics: off-centre by more than LOW_QUALITY_OFFCENTRE_MM
+# lowers quality; by more than MAX_OFFCENTRE_MM (a head turned ~15 degrees,
+# or skin such as a hand widening one side by ~2 cm) rejects the row.
+LOW_QUALITY_OFFCENTRE_MM = 5.0
+MAX_OFFCENTRE_MM = 10.0
 
-# Provisional heuristic: the larger half-width (chin column to an edge) may
-# be at most this multiple of the smaller one; a hand or other skin next to
-# one side of the neck widens one half only. Validation: 1.00-1.10 on clean
-# frontal photos, 1.38 for a synthetic 25 mm hand. Above the "low" ratio the
-# result is marked low quality.
-MAX_HALF_WIDTH_RATIO = 1.3
-LOW_QUALITY_HALF_WIDTH_RATIO = 1.15
+# A hand or other object against the side of the neck and nearer than it
+# shows up as the depth stepping *nearer* while walking from the neck centre
+# out towards an edge (a neck only recedes towards its sides). Largest such
+# step on clean real rows: 0.6 cm (beard/noise; IMG_2389); a hand 1 cm in
+# front of the neck edge gives ~3 cm. Provisional: reject at this step.
+MAX_OUTWARD_DEPTH_STEP_CM = 1.5
 
-# Provisional heuristic: the neck (edge distance, px) may be at most this
-# multiple of the FaceMesh jaw width (landmarks 172-397). Validation photos:
-# 0.93-1.03.
-MAX_NECK_TO_JAW_WIDTH = 1.1
+# Neck (edge distance, px) relative to the FaceMesh jaw width (172-397).
+# Validation photos: 0.93-1.03. A thick neck (the population screened by
+# neck circumference) can exceed the jaw, so above LOW_QUALITY_NECK_TO_JAW
+# the result is only marked low quality; at MAX_NECK_TO_JAW (a neck width of
+# ~20 cm for a typical 14 cm landmark jaw width, i.e. a ~60 cm neck) the row
+# is rejected as implausible: skin beside the neck, not neck.
+LOW_QUALITY_NECK_TO_JAW = 1.2
+MAX_NECK_TO_JAW = 1.5
 
 # Left/right tangent depths differing by more than this reject the row
 # (one edge is not on the neck); a manual measurement only warns.
@@ -228,6 +300,10 @@ WIDTH_STABILITY_TOLERANCE = 0.04
 MIN_SUPPORT_MM = 2.0
 # ... and is "low" quality below this (IMG_2389's run spans 3.7 mm).
 GOOD_SUPPORT_MM = 5.0
+
+# Below this much neck skin (rows with skin edges x ROW_STEP_MM) the
+# advice is "not visible" whatever the rows' rejection reasons.
+MIN_VISIBLE_NECK_MM = 10.0
 
 # A clean run is broken by a gap (rows without skin edges) taller than this.
 MAX_RUN_GAP_MM = 3.0
@@ -249,7 +325,8 @@ class NeckWidthRow:
 
     ``left_ok`` / ``right_ok``: that edge passes the per-edge checks (depth
     inside valid, outside not nearer, edge near vertical). ``reject_reason``
-    is None for a clean row, else why the row was not used. Depths in cm;
+    is None for a clean row, else why the row was not used, and
+    ``reject_codes`` the same as :data:`REJECT_LABELS` keys. Depths in cm;
     None where invalid. ``left_slope``/``right_slope``: signed ``dx/dy`` of
     the edge over +-:data:`EDGE_SLOPE_BASELINE_MM` (None = not evaluated).
     """
@@ -267,6 +344,7 @@ class NeckWidthRow:
     left_slope: float | None = None
     right_slope: float | None = None
     reject_reason: str | None = None
+    reject_codes: list[str] = field(default_factory=list)
 
     @property
     def clean(self) -> bool:
@@ -318,6 +396,8 @@ class NeckWidthResult:
     :ivar warnings: human-readable caveats
     :ivar message: why there is no number (status != "ok"), else None
     :ivar rows: every evaluated row, for overlays
+    :ivar reject_counts: ``{reject code: rows}`` over ``rows`` (codes and
+        labels in :data:`REJECT_LABELS`), most frequent first
     :ivar chin: ``(x, y)`` chin landmark used, photo px
     :ivar neck_joint: Vision ``(x, y, confidence)`` neck joint, or None
     """
@@ -343,6 +423,7 @@ class NeckWidthResult:
     warnings: list[str] = field(default_factory=list)
     message: str | None = None
     rows: list[NeckWidthRow] = field(default_factory=list)
+    reject_counts: dict[str, int] = field(default_factory=dict)
     chin: tuple[float, float] | None = None
     neck_joint: tuple[float, float, float] | None = None
 
@@ -484,10 +565,13 @@ def _evaluate_edges(depth, camera, photo_size, left_xy, right_xy, z_ref_cm):
     left_ok = _edge_ok(left_in, left_out, z_ref_cm)
     right_ok = _edge_ok(right_in, right_out, z_ref_cm)
     reason = None
+    codes = []
     if width is None:
         reason = "no depth inside an edge"
+        codes.append(REJECT_NO_DEPTH)
     elif not (left_ok and right_ok):
         reason = "edge occluded (outside nearer) or edge depth not on the neck"
+        codes.append(REJECT_OCCLUDED)
     return NeckWidthRow(
         y=0.5 * (yl + yr),
         left_x=xl,
@@ -500,23 +584,39 @@ def _evaluate_edges(depth, camera, photo_size, left_xy, right_xy, z_ref_cm):
         left_ok=left_ok,
         right_ok=right_ok,
         reject_reason=reason,
+        reject_codes=codes,
     )
 
 
-def _half_width_ratio(row: NeckWidthRow, mid_x: float) -> float:
-    left_half = mid_x - row.left_x
-    right_half = row.right_x - mid_x
-    if min(left_half, right_half) <= 0:
-        return math.inf
-    return max(left_half, right_half) / min(left_half, right_half)
+def _offcentre_mm(row: NeckWidthRow, reference_x: float, px_per_mm: float) -> float:
+    """Signed distance (mm) of the neck centre from the face reference."""
+    return (0.5 * (row.left_x + row.right_x) - reference_x) / px_per_mm
 
 
-def _apply_shape_checks(
-    row: NeckWidthRow, edges_above, edges_below, baseline_px, mid_x, jaw_width_px
-):
-    """Reject rows whose edges are oblique, off the midline, asymmetric,
-    wider than the jaw or at very different depths (see the module
-    constants)."""
+def _outward_depth_step_cm(depth_cm, depth_obj, row: NeckWidthRow, inset_px: float) -> float:
+    """Largest step *nearer* (cm) when walking from the neck centre out to
+    each edge's inset point along the row (NaN ignored); 0 without depth."""
+    photo_w, photo_h = depth_obj.photo_size
+    rows, cols = depth_cm.shape
+    r = min(max(round(row.y * (rows - 1) / (photo_h - 1)), 0), rows - 1)
+    k = (cols - 1) / (photo_w - 1)
+    centre = round(0.5 * (row.left_x + row.right_x) * k)
+    worst = 0.0
+    for end_x in (row.left_x + inset_px, row.right_x - inset_px):
+        end = min(max(round(end_x * k), 0), cols - 1)
+        segment = (
+            depth_cm[r, centre : end + 1] if end >= centre else depth_cm[r, end : centre + 1][::-1]
+        )
+        segment = segment[np.isfinite(segment)]
+        if segment.size:
+            worst = max(worst, float(np.max(np.maximum.accumulate(segment) - segment)))
+    return worst
+
+
+def _apply_shape_checks(row: NeckWidthRow, edges_above, edges_below, baseline_px, context):
+    """Reject rows whose edges are oblique, off-centre under the face, with
+    something nearer than the neck beside it, implausibly wide for the jaw
+    or at very different depths (see the module constants)."""
     if edges_above is not None and edges_below is not None:
         span = 2.0 * baseline_px
         row.left_slope = (edges_below[0] - edges_above[0]) / span
@@ -524,33 +624,53 @@ def _apply_shape_checks(
     else:
         row.left_slope = row.right_slope = None
     reasons = [] if row.reject_reason is None else [row.reject_reason]
+    codes = row.reject_codes
+
+    def reject(code, text):
+        codes.append(code)
+        reasons.append(text)
+
     if row.left_slope is None:
-        reasons.append("edge slope unknown (no skin edges next to the row)")
+        reject(REJECT_NO_SLOPE, "edge slope unknown (no skin edges next to the row)")
     else:
         for side, slope in (("left", row.left_slope), ("right", row.right_slope)):
             if abs(slope) > MAX_EDGE_SLOPE:
-                reasons.append(f"{side} edge oblique (|dx/dy| {abs(slope):.2f}; collar V?)")
+                reject(REJECT_OBLIQUE, f"{side} edge oblique (|dx/dy| {abs(slope):.2f}; collar V?)")
                 if side == "left":
                     row.left_ok = False
                 else:
                     row.right_ok = False
-    edge_distance = row.right_x - row.left_x
-    offset = abs(0.5 * (row.left_x + row.right_x) - mid_x)
-    if edge_distance <= 0 or offset > MAX_MIDLINE_OFFSET_FRACTION * edge_distance:
-        reasons.append("edges not centred on the facial midline")
-    elif _half_width_ratio(row, mid_x) > MAX_HALF_WIDTH_RATIO:
-        reasons.append(
-            "edges asymmetric about the facial midline (hand or skin next to the neck, "
-            "or head turned?)"
+    px_mm = context["px_per_mm"]
+    if row.right_x <= row.left_x:
+        reject(REJECT_OFFCENTRE, "edges crossed")
+    elif abs(_offcentre_mm(row, context["reference_x"], px_mm)) > MAX_OFFCENTRE_MM:
+        reject(
+            REJECT_OFFCENTRE,
+            f"neck centre {abs(_offcentre_mm(row, context['reference_x'], px_mm)):.0f} mm "
+            "off the jaw centre (head turned, or skin such as a hand beside the neck?)",
         )
-    if jaw_width_px is not None and edge_distance > MAX_NECK_TO_JAW_WIDTH * jaw_width_px:
-        reasons.append("neck wider than the jaw (hand or skin next to the neck?)")
+    step = _outward_depth_step_cm(context["depth_cm"], context["depth"], row, EDGE_INSET_MM * px_mm)
+    if step >= MAX_OUTWARD_DEPTH_STEP_CM:
+        reject(
+            REJECT_DEPTH_STEP,
+            f"depth steps {step:.1f} cm nearer towards an edge (something beside the neck, hand?)",
+        )
+    jaw = context["jaw_width_px"]
+    if jaw is not None and row.right_x - row.left_x >= MAX_NECK_TO_JAW * jaw:
+        reject(
+            REJECT_WIDE,
+            f"skin span {(row.right_x - row.left_x) / jaw:.2f}x the jaw width "
+            "(skin beside the neck?)",
+        )
     if (
         row.left_depth_cm is not None
         and row.right_depth_cm is not None
         and abs(row.left_depth_cm - row.right_depth_cm) > MAX_TANGENT_DEPTH_ASYMMETRY_CM
     ):
-        reasons.append("left/right edge depths too different (one edge not on the neck)")
+        reject(
+            REJECT_DEPTH_ASYMMETRY,
+            "left/right edge depths too different (one edge not on the neck)",
+        )
     row.reject_reason = "; ".join(reasons) if reasons else None
 
 
@@ -581,11 +701,6 @@ def _edge_warnings(row: NeckWidthRow) -> list[str]:
             f"{abs(row.left_depth_cm - row.right_depth_cm):.1f} cm (head rotated?)"
         )
     return warnings
-
-
-def _has_occluded_edge(row: NeckWidthRow) -> bool:
-    """Either edge has its outside nearer than its inside (an occluder)."""
-    return any(d <= -OCCLUDER_MARGIN_CM for d in row.outside_minus_inside_cm())
 
 
 def _topmost_clean_run(rows, max_gap_px):
@@ -734,6 +849,11 @@ def measure_neck_width(
         )
     roll_deg = math.degrees(math.atan2(chin_x - nose_x, chin_y - nose_y))
     jaw_width_px = _jaw_width_px(landmarks)
+    if jaw_width_px is not None:
+        jaw_l, jaw_r = (landmarks[i] for i in FACE_MESH_JAW_INDICES)
+        reference_x = 0.5 * (float(jaw_l[0]) + float(jaw_r[0]))
+    else:
+        reference_x = chin_x
 
     depth = portrait.depth.median_filtered(3)
     z_chin = depth.distance_cm(chin_x, chin_y, DEPTH_WINDOW_RADIUS)
@@ -762,6 +882,17 @@ def measure_neck_width(
     step = max(1.0, ROW_STEP_MM * px_mm)
     y = chin_y + CHIN_CLEARANCE_MM * px_mm
     baseline = EDGE_SLOPE_BASELINE_MM * px_mm
+    # Metric checks along the neck use its (not the chin's) distance: the
+    # neck sides are ~8 cm behind the chin. Approximated by the chin depth
+    # plus that offset, refined per row where it matters (width, support).
+    neck_px_mm = _px_per_mm(camera, z_chin + NECK_BEHIND_CHIN_CM)
+    context = {
+        "px_per_mm": neck_px_mm,
+        "reference_x": reference_x,
+        "jaw_width_px": jaw_width_px,
+        "depth": depth,
+        "depth_cm": depth.to_cm_array(),
+    }
 
     def edges_at(row_y):
         return skin_edges_at_row(
@@ -781,12 +912,7 @@ def measure_neck_width(
                 depth, camera, photo_size, (edges[0], row_y), (edges[1], row_y), z_chin
             )
             _apply_shape_checks(
-                row,
-                edges_at(row_y - baseline),
-                edges_at(row_y + baseline),
-                baseline,
-                chin_x,
-                jaw_width_px,
+                row, edges_at(row_y - baseline), edges_at(row_y + baseline), baseline, context
             )
             result.rows.append(row)
         y += step
@@ -800,17 +926,18 @@ def measure_neck_width(
     if stable:
         neck_z = float(np.median([_mean_edge_depth_cm(r) for r in stable]))
         support_mm = (stable[-1].y - stable[0].y) / _px_per_mm(camera, neck_z)
+    result.reject_counts = _count_rejections(result.rows)
     if not stable or support_mm < MIN_SUPPORT_MM:
+        # Never silent: every rejection reason is listed (for an "ok" result
+        # they stay in reject_counts only -- rows below the measured ones
+        # are expected to hit the collar).
+        for code, count in result.reject_counts.items():
+            result.warnings.append(f"{REJECT_LABELS[code][0]} on {count} rows")
         result.message = (
-            f"{EDGES_OCCLUDED_MESSAGE} ({len(result.rows)} rows with skin edges; clean, "
-            f"stable rows span {support_mm:.1f} mm, {MIN_SUPPORT_MM:.0f} mm needed)"
+            f"{_advice(result.reject_counts, bool(stable), len(result.rows))} "
+            f"({len(result.rows)} rows with skin edges; clean, stable rows span "
+            f"{support_mm:.1f} mm, {MIN_SUPPORT_MM:.0f} mm needed)"
         )
-        occluded = sum(1 for r in result.rows if _has_occluded_edge(r))
-        oblique = sum(1 for r in result.rows if r.reject_reason and "oblique" in r.reject_reason)
-        if occluded:
-            result.warnings.append(f"outside nearer than neck edge (collar?) on {occluded} rows")
-        if oblique:
-            result.warnings.append(f"oblique edges (collar V / jaw line) on {oblique} rows")
         return result
 
     width = float(np.median([r.width_mm for r in stable]))
@@ -834,12 +961,40 @@ def measure_neck_width(
     if slopes:
         result.neck_roll_deg = math.degrees(math.atan(float(np.median(slopes))))
     result.warnings.extend(_edge_warnings(chosen))
-    _assess_quality(result, stable, chin_x)
+    _assess_quality(result, stable, context)
     result.status = STATUS_OK
     return _finish(result, chosen, width)
 
 
-def _assess_quality(result: NeckWidthResult, stable, chin_x):
+def _count_rejections(rows) -> dict[str, int]:
+    """``{reject code: number of rows}`` (a row counts once per code),
+    most frequent first."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        for code in set(row.reject_codes):
+            counts[code] = counts.get(code, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: -item[1]))
+
+
+def _advice(counts: dict[str, int], had_clean_rows: bool, n_rows: int) -> str:
+    """The status message for an ``edges-occluded`` result: the advice for
+    the dominant rejection reason."""
+    if n_rows * ROW_STEP_MM < MIN_VISIBLE_NECK_MM:
+        # Hardly any neck skin below the chin: the neck is not in view.
+        return ADVICE_TOO_CLOSE
+    if had_clean_rows and not counts:
+        return ADVICE_TOO_FEW
+    if not counts:
+        return ADVICE_TOO_CLOSE
+    # Something beside the neck overrides the collar advice when it is
+    # common: it is what the user can fix.
+    for code in (REJECT_DEPTH_STEP, REJECT_WIDE):
+        if counts.get(code, 0) * 2 >= n_rows:
+            return REJECT_LABELS[code][1]
+    return REJECT_LABELS[next(iter(counts))][1]
+
+
+def _assess_quality(result: NeckWidthResult, stable, context):
     """Set ``quality``/``quality_reasons`` (and the matching warnings)."""
     reasons = []
     close = [
@@ -850,7 +1005,7 @@ def _assess_quality(result: NeckWidthResult, stable, chin_x):
     ]
     if close:
         reasons.append(
-            f"collar close to the neck edge (outside nearer by up to {-min(close):.1f} cm)"
+            f"collar close to the neck edge (outside nearer by up to {-min(close):.2f} cm)"
         )
         if not any("collar close" in w for w in result.warnings):
             result.warnings.append(reasons[-1])
@@ -858,9 +1013,20 @@ def _assess_quality(result: NeckWidthResult, stable, chin_x):
         reasons.append(
             f"clean rows span only {result.support_mm:.1f} mm (< {GOOD_SUPPORT_MM:.0f} mm)"
         )
-    ratio = max(_half_width_ratio(r, chin_x) for r in stable)
-    if ratio > LOW_QUALITY_HALF_WIDTH_RATIO:
-        reasons.append(f"edges asymmetric about the facial midline (half-width ratio {ratio:.2f})")
+    offcentre = max(
+        abs(_offcentre_mm(r, context["reference_x"], context["px_per_mm"])) for r in stable
+    )
+    if offcentre > LOW_QUALITY_OFFCENTRE_MM:
+        reasons.append(
+            f"neck centre {offcentre:.1f} mm off the jaw centre (head turned or asymmetric?)"
+        )
+    jaw = context["jaw_width_px"]
+    if jaw is not None:
+        ratio = max((r.right_x - r.left_x) / jaw for r in stable)
+        if ratio > LOW_QUALITY_NECK_TO_JAW:
+            reasons.append(
+                f"neck {ratio:.2f}x the FaceMesh jaw width (thick neck, or skin beside it?)"
+            )
     for label, angle in (("head", result.roll_deg), ("neck", result.neck_roll_deg)):
         if angle is not None and abs(angle) > MAX_ROLL_DEG:
             text = f"{label} roll {angle:.1f} deg: horizontal rows read the width / cos(roll)"
