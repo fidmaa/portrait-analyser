@@ -917,3 +917,14 @@ def test_depth_step_counts_for_hand_advice_only_as_the_sole_reason():
     hand = [row(["depth-step"])] * 6 + [row(["oblique"])] * 4
     counts = neck_width._count_rejections(hand)
     assert neck_width._advice(counts, False, hand) == neck_width.ADVICE_BESIDE
+
+
+def test_rejection_ties_are_ordered_deterministically():
+    """Equal counts must not depend on set iteration order (hash seed)."""
+    from types import SimpleNamespace
+
+    rows = [SimpleNamespace(reject_codes=["depth-step", "occluded"])] * 3
+    counts = neck_width._count_rejections(rows)
+    order = list(neck_width.REJECT_LABELS)
+    assert list(counts) == sorted(counts, key=order.index)
+    assert neck_width._advice(counts, False, rows * 10) == neck_width.ADVICE_COLLAR

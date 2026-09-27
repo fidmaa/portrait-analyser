@@ -86,8 +86,9 @@ moderately off-centre is *measured* with low quality, not rejected.
 Residual risk: a narrow strip of skin (a finger, a hand edge) flush with one
 side of the neck and at the neck's depth has no depth step and shifts the
 neck centre by only half its width: up to ~10 mm wide it gives ok/good with
-a width a few % high (8 mm: +6 %), 12-24 mm gives ok/low ("off the jaw
-centre") with +9-18 %; only from ~24 mm is it rejected. Check the overlay. Every
+a width a few % high (8 mm: +6 %), 12-25 mm gives ok/low ("off the jaw
+centre") with up to ~+19 %; it is rejected only from ~25 mm wide or when it
+is >= 1 cm nearer than the neck (depth step). Check the overlay. Every
 rejected row is counted by reason (``reject_counts``, warnings), and an
 ``edges-occluded`` message gives the advice for the dominant reason.
 
@@ -172,9 +173,7 @@ ADVICE_COLLAR = (
 )
 ADVICE_BESIDE = "something next to the neck (hand, hair?) -- keep it away from the neck"
 ADVICE_TURNED = "neck not centred under the face -- face the camera"
-ADVICE_TOO_CLOSE = (
-    "neck edges not visible -- take the photo from further away / include the neck below the chin"
-)
+ADVICE_TOO_CLOSE = "neck edges not visible -- take the photo from further away / include the neck below the chin"
 ADVICE_TOO_FEW = (
     "too few clean rows below the chin -- take the photo from further away / include more "
     "of the neck"
@@ -183,17 +182,24 @@ ADVICE_TOO_FEW = (
 REJECT_LABELS = {
     REJECT_OCCLUDED: ("outside nearer than neck edge (collar?)", ADVICE_COLLAR),
     REJECT_OBLIQUE: ("oblique edges (collar V / jaw line)", ADVICE_COLLAR),
-    REJECT_DEPTH_STEP: ("depth steps nearer towards an edge (hand, collar?)", ADVICE_BESIDE),
-    REJECT_WIDE: ("skin span much wider than the jaw (skin beside the neck?)", ADVICE_BESIDE),
-    REJECT_OFFCENTRE: ("neck off-centre under the face (head turned or hand?)", ADVICE_TURNED),
+    REJECT_DEPTH_STEP: (
+        "depth steps nearer towards an edge (hand, collar?)",
+        ADVICE_BESIDE,
+    ),
+    REJECT_WIDE: (
+        "skin span much wider than the jaw (skin beside the neck?)",
+        ADVICE_BESIDE,
+    ),
+    REJECT_OFFCENTRE: (
+        "neck off-centre under the face (head turned or hand?)",
+        ADVICE_TURNED,
+    ),
     REJECT_DEPTH_ASYMMETRY: ("left/right edge depths too different", ADVICE_TURNED),
     REJECT_NO_DEPTH: ("no depth inside an edge", ADVICE_TOO_CLOSE),
     REJECT_NO_SLOPE: ("no skin edges next to the row (gap)", ADVICE_TOO_CLOSE),
 }
 
-EDGES_OCCLUDED_MESSAGE = (
-    "neck edges not visible -- take the photo from further away / include the neck below the chin"
-)
+EDGES_OCCLUDED_MESSAGE = "neck edges not visible -- take the photo from further away / include the neck below the chin"
 
 # -- parameters (metric; converted to pixels with the camera and depth) --------
 
@@ -468,7 +474,9 @@ def _landmarks(face_mesh):
     """Landmark list from a ``FaceMeshDebug`` or a plain sequence."""
     landmarks = getattr(face_mesh, "landmarks", face_mesh)
     if landmarks is None or len(landmarks) <= FACE_MESH_CHIN_INDEX:
-        raise ValueError(f"face_mesh needs at least {FACE_MESH_CHIN_INDEX + 1} FaceMesh landmarks")
+        raise ValueError(
+            f"face_mesh needs at least {FACE_MESH_CHIN_INDEX + 1} FaceMesh landmarks"
+        )
     return landmarks
 
 
@@ -532,7 +540,9 @@ def skin_edges_at_row(skin, y, mid_x, *, gap_px, search_px, min_span_px):
 
 def _depth_along(depth, x, y, ux, uy, offset_px):
     """Median depth (cm) at ``(x, y) + offset_px * (ux, uy)``, or None."""
-    return depth.distance_cm(x + offset_px * ux, y + offset_px * uy, DEPTH_WINDOW_RADIUS)
+    return depth.distance_cm(
+        x + offset_px * ux, y + offset_px * uy, DEPTH_WINDOW_RADIUS
+    )
 
 
 def _edge_depths(depth, camera, x, y, ux, uy, z_ref_cm):
@@ -543,12 +553,18 @@ def _edge_depths(depth, camera, x, y, ux, uy, z_ref_cm):
     recomputed at the depth found). Outside: :data:`OUTSIDE_OFFSET_MM`
     outward.
     """
-    inside = _depth_along(depth, x, y, ux, uy, EDGE_INSET_MM * _px_per_mm(camera, z_ref_cm))
+    inside = _depth_along(
+        depth, x, y, ux, uy, EDGE_INSET_MM * _px_per_mm(camera, z_ref_cm)
+    )
     if inside is not None:
-        refined = _depth_along(depth, x, y, ux, uy, EDGE_INSET_MM * _px_per_mm(camera, inside))
+        refined = _depth_along(
+            depth, x, y, ux, uy, EDGE_INSET_MM * _px_per_mm(camera, inside)
+        )
         inside = refined if refined is not None else inside
     z_out_ref = inside if inside is not None else z_ref_cm
-    outside = _depth_along(depth, x, y, ux, uy, -OUTSIDE_OFFSET_MM * _px_per_mm(camera, z_out_ref))
+    outside = _depth_along(
+        depth, x, y, ux, uy, -OUTSIDE_OFFSET_MM * _px_per_mm(camera, z_out_ref)
+    )
     return inside, outside
 
 
@@ -642,7 +658,9 @@ def _offcentre_mm(row: NeckWidthRow, context) -> float | None:
     return centre - context["face_x_mm"]
 
 
-def _outward_depth_step_cm(depth_cm, depth_obj, row: NeckWidthRow, inset_px: float) -> float:
+def _outward_depth_step_cm(
+    depth_cm, depth_obj, row: NeckWidthRow, inset_px: float
+) -> float:
     """Largest step *nearer* (cm) when walking from the neck centre out to
     each edge's inset point along the row (NaN ignored); 0 without depth."""
     photo_w, photo_h = depth_obj.photo_size
@@ -654,7 +672,9 @@ def _outward_depth_step_cm(depth_cm, depth_obj, row: NeckWidthRow, inset_px: flo
     for end_x in (row.left_x + inset_px, row.right_x - inset_px):
         end = min(max(round(end_x * k), 0), cols - 1)
         segment = (
-            depth_cm[r, centre : end + 1] if end >= centre else depth_cm[r, end : centre + 1][::-1]
+            depth_cm[r, centre : end + 1]
+            if end >= centre
+            else depth_cm[r, end : centre + 1][::-1]
         )
         segment = segment[np.isfinite(segment)]
         if segment.size:
@@ -662,7 +682,9 @@ def _outward_depth_step_cm(depth_cm, depth_obj, row: NeckWidthRow, inset_px: flo
     return worst
 
 
-def _apply_shape_checks(row: NeckWidthRow, edges_above, edges_below, baseline_px, context):
+def _apply_shape_checks(
+    row: NeckWidthRow, edges_above, edges_below, baseline_px, context
+):
     """Reject rows whose edges are oblique, off-centre under the face, with
     something nearer than the neck beside it, implausibly wide for the jaw
     or at very different depths (see the module constants)."""
@@ -684,7 +706,10 @@ def _apply_shape_checks(row: NeckWidthRow, edges_above, edges_below, baseline_px
     else:
         for side, slope in (("left", row.left_slope), ("right", row.right_slope)):
             if abs(slope) > MAX_EDGE_SLOPE:
-                reject(REJECT_OBLIQUE, f"{side} edge oblique (|dx/dy| {abs(slope):.2f}; collar V?)")
+                reject(
+                    REJECT_OBLIQUE,
+                    f"{side} edge oblique (|dx/dy| {abs(slope):.2f}; collar V?)",
+                )
                 if side == "left":
                     row.left_ok = False
                 else:
@@ -699,7 +724,9 @@ def _apply_shape_checks(row: NeckWidthRow, edges_above, edges_below, baseline_px
             f"neck centre {abs(offcentre):.0f} mm off the jaw centre "
             "(head turned, or skin such as a hand beside the neck?)",
         )
-    step = _outward_depth_step_cm(context["depth_cm"], context["depth"], row, EDGE_INSET_MM * px_mm)
+    step = _outward_depth_step_cm(
+        context["depth_cm"], context["depth"], row, EDGE_INSET_MM * px_mm
+    )
     if step >= MAX_OUTWARD_DEPTH_STEP_CM:
         reject(
             REJECT_DEPTH_STEP,
@@ -744,7 +771,8 @@ def _edge_warnings(row: NeckWidthRow) -> list[str]:
     if (
         row.left_depth_cm is not None
         and row.right_depth_cm is not None
-        and abs(row.left_depth_cm - row.right_depth_cm) > TANGENT_DEPTH_ASYMMETRY_WARN_CM
+        and abs(row.left_depth_cm - row.right_depth_cm)
+        > TANGENT_DEPTH_ASYMMETRY_WARN_CM
     ):
         warnings.append(
             f"left/right edge depths differ by "
@@ -807,18 +835,25 @@ def _band_bottom(portrait, body_pose, use_vision, chin_y, z_chin_cm, camera, war
         try:
             body_pose = detect_body_pose(portrait.photo)
         except AppleVisionUnavailable as exc:
-            logger.info("Apple Vision unavailable (%s); neck band from the chin offset", exc)
+            logger.info(
+                "Apple Vision unavailable (%s); neck band from the chin offset", exc
+            )
         except AppleVisionError as exc:
             logger.warning(
-                "Apple Vision body pose failed; neck band from the chin offset", exc_info=True
+                "Apple Vision body pose failed; neck band from the chin offset",
+                exc_info=True,
             )
-            warnings.append(f"Apple Vision body pose failed ({exc}); band from chin offset")
+            warnings.append(
+                f"Apple Vision body pose failed ({exc}); band from chin offset"
+            )
     neck = None if body_pose is None else body_pose.neck(VISION_NECK_MIN_CONFIDENCE)
     min_bottom = chin_y + 2 * CHIN_CLEARANCE_MM * _px_per_mm(camera, z_chin_cm)
     if neck is not None and neck[1] > min_bottom:
         return float(neck[1]), BAND_SOURCE_VISION, neck
     if body_pose is not None:
-        warnings.append("Vision neck joint not found below the chin; band from chin offset")
+        warnings.append(
+            "Vision neck joint not found below the chin; band from chin offset"
+        )
     bottom = chin_y + CHIN_OFFSET_BAND_MM * _px_per_mm(camera, z_chin_cm)
     return float(bottom), BAND_SOURCE_CHIN_OFFSET, neck
 
@@ -886,7 +921,9 @@ def measure_neck_width(
 
         face_mesh = detect_face_mesh(portrait.photo)
         if face_mesh is None:
-            return NeckWidthResult(status=STATUS_NO_FACE, message="FaceMesh found no face")
+            return NeckWidthResult(
+                status=STATUS_NO_FACE, message="FaceMesh found no face"
+            )
     landmarks = _landmarks(face_mesh)
     chin_x, chin_y = (float(v) for v in landmarks[FACE_MESH_CHIN_INDEX])
     nose_x, nose_y = (float(v) for v in landmarks[FACE_MESH_NOSE_INDEX])
@@ -904,7 +941,9 @@ def measure_neck_width(
     z_chin = depth.distance_cm(chin_x, chin_y, DEPTH_WINDOW_RADIUS)
     if z_chin is None:
         return NeckWidthResult(
-            status=STATUS_NO_DEPTH, message="no depth at the chin", chin=(chin_x, chin_y)
+            status=STATUS_NO_DEPTH,
+            message="no depth at the chin",
+            chin=(chin_x, chin_y),
         )
     face_x_mm = _face_reference_x_mm(landmarks, depth, camera, chin_x, z_chin)
 
@@ -959,7 +998,11 @@ def measure_neck_width(
                 depth, camera, photo_size, (edges[0], row_y), (edges[1], row_y), z_chin
             )
             _apply_shape_checks(
-                row, edges_at(row_y - baseline), edges_at(row_y + baseline), baseline, context
+                row,
+                edges_at(row_y - baseline),
+                edges_at(row_y + baseline),
+                baseline,
+                context,
             )
             result.rows.append(row)
         y += step
@@ -968,7 +1011,11 @@ def measure_neck_width(
     stable = []
     if run:
         median = float(np.median([r.width_mm for r in run]))
-        stable = [r for r in run if abs(r.width_mm - median) <= WIDTH_STABILITY_TOLERANCE * median]
+        stable = [
+            r
+            for r in run
+            if abs(r.width_mm - median) <= WIDTH_STABILITY_TOLERANCE * median
+        ]
     support_mm = 0.0
     if stable:
         neck_z = float(np.median([_mean_edge_depth_cm(r) for r in stable]))
@@ -1020,7 +1067,15 @@ def _count_rejections(rows) -> dict[str, int]:
     for row in rows:
         for code in set(row.reject_codes):
             counts[code] = counts.get(code, 0) + 1
-    return dict(sorted(counts.items(), key=lambda item: -item[1]))
+    # Ties are broken by the fixed order of REJECT_LABELS, not by set
+    # iteration order (which depends on the hash seed).
+    priority = {code: index for index, code in enumerate(REJECT_LABELS)}
+    return dict(
+        sorted(
+            counts.items(),
+            key=lambda item: (-item[1], priority.get(item[0], len(priority))),
+        )
+    )
 
 
 def _advice(counts: dict[str, int], had_clean_rows: bool, rows) -> str:
@@ -1041,7 +1096,12 @@ def _advice(counts: dict[str, int], had_clean_rows: bool, rows) -> str:
     sole_step = sum(1 for r in rows if set(r.reject_codes) == {REJECT_DEPTH_STEP})
     if sole_step * 2 >= n_rows or counts.get(REJECT_WIDE, 0) * 2 >= n_rows:
         return ADVICE_BESIDE
-    return REJECT_LABELS[next(iter(counts))][1]
+    # A depth step alongside other reasons is a collar-V artefact (see
+    # above), so it never decides the advice on its own count.
+    dominant = next((code for code in counts if code != REJECT_DEPTH_STEP), None)
+    if dominant is None:
+        return ADVICE_BESIDE
+    return REJECT_LABELS[dominant][1]
 
 
 def _assess_quality(result: NeckWidthResult, stable, context):
@@ -1066,7 +1126,8 @@ def _assess_quality(result: NeckWidthResult, stable, context):
     offcentre = max(abs(_offcentre_mm(r, context)) for r in stable)
     if offcentre > LOW_QUALITY_OFFCENTRE_MM:
         reasons.append(
-            f"neck centre {offcentre:.1f} mm off the jaw centre (head turned or asymmetric?)"
+            f"neck centre {offcentre:.1f} mm off the jaw centre (head turned, or skin "
+            f"such as a hand/finger beside the neck -- check the overlay)"
         )
     jaw = context["jaw_width_px"]
     if jaw is not None:
@@ -1084,7 +1145,9 @@ def _assess_quality(result: NeckWidthResult, stable, context):
     result.quality = QUALITY_LOW if reasons else QUALITY_GOOD
 
 
-def neck_width_from_edges(portrait, left_xy, right_xy, *, camera=None) -> NeckWidthResult | None:
+def neck_width_from_edges(
+    portrait, left_xy, right_xy, *, camera=None
+) -> NeckWidthResult | None:
     """Semi-automatic neck width from two user-clicked edge points (photo px).
 
     The tangent depth of each click is a median :data:`EDGE_INSET_MM` inward
@@ -1140,7 +1203,9 @@ def neck_width_from_edges(portrait, left_xy, right_xy, *, camera=None) -> NeckWi
     result.rows_used = [row.y]
     result.band = (row.y, row.y)
     manual_reasons = [
-        w for w in result.warnings if "collar" in w or "differ by" in w or "no depth" in w
+        w
+        for w in result.warnings
+        if "collar" in w or "differ by" in w or "no depth" in w
     ]
     result.quality_reasons = manual_reasons
     result.quality = QUALITY_LOW if manual_reasons else QUALITY_GOOD
