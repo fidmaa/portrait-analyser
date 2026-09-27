@@ -15,7 +15,6 @@ from PIL import Image, ImageOps
 
 from portrait_analyser.apple_depth import (
     DISPARITY_FAR_CAP_M,
-    NEAR_PERCENTILE,
     encode_depth_as_disparity_8bit,
 )
 from portrait_analyser.camera import (
@@ -129,6 +128,15 @@ class TestCameraModel:
             2766.0, 2765.0, 1499.0, 2019.5, width=3024, height=4032
         )
 
+    def test_from_portrait_refuses_implausible_depth(self):
+        class Inverted:
+            focal_length_px = (2766.0, 2765.0)
+            principal_point_px = (1499.0, 2019.5)
+            depth_accuracy = "absolute"
+            depth_plausible = False
+
+        assert CameraModel.from_portrait(Inverted()) is None
+
     def test_from_portrait_requires_absolute_depth(self):
         class Relative:
             focal_length_px = (2766.0, 2765.0)
@@ -222,8 +230,10 @@ class TestDisparityEncoding:
         assert image.mode == "L"
         assert image.size == (80, 60)
         valid = np.isfinite(depth) & (depth <= DISPARITY_FAR_CAP_M)
-        z_near = np.percentile(depth[valid], NEAR_PERCENTILE)
-        assert float_max == pytest.approx(1.0 / z_near)
+        # Random noise: the robust near end (min of the 3x3 median) lies
+        # between the true minimum and the lower percentiles.
+        z_near = 1.0 / float_max
+        assert np.nanmin(depth[valid]) <= z_near < np.nanmin(depth[valid]) + 0.1
         assert float_min == pytest.approx(1.0 / np.nanmax(depth[valid]))
 
         codes = np.asarray(image)
@@ -252,7 +262,11 @@ class TestDisparityEncoding:
             )
 
     def test_documented_step_at_30_cm_is_about_a_millimetre(self):
-        depth = np.array([[0.25, 0.30], [0.50, DISPARITY_FAR_CAP_M]], dtype=np.float32)
+        # Blocks, as in a real portrait: face at 0.25-0.30 m, background far.
+        depth = np.full((20, 20), 0.50, dtype=np.float32)
+        depth[:5, :5] = 0.25
+        depth[5:10, :5] = 0.30
+        depth[15:, 15:] = DISPARITY_FAR_CAP_M
         _, float_min, float_max = encode_depth_as_disparity_8bit(depth)
         step_mm_at_30_cm = 1000.0 * 0.30**2 * (float_max - float_min) / 255.0
         assert 1.0 < step_mm_at_30_cm < 1.5
@@ -264,6 +278,19 @@ class TestDisparityEncoding:
         image, _, float_max = encode_depth_as_disparity_8bit(depth)
         assert float_max == pytest.approx(1.0 / 0.35, rel=1e-3)
         assert np.asarray(image)[0, 0] == 255
+
+    def test_real_near_surface_is_kept_exactly(self):
+        # A nose-tip-sized patch (5x5 depth pixels) nearer than the rest
+        # must set the near end itself, not be clipped by a percentile.
+        depth = np.full((480, 640), 0.40, dtype=np.float32)
+        depth[:, 320:] = 1.5
+        depth[200:205, 100:105] = 0.294
+        image, _, float_max = encode_depth_as_disparity_8bit(depth)
+        assert 1.0 / float_max == pytest.approx(0.294, abs=1e-6)
+        assert depth_raw_to_distance_cm(255, 1.0, float_max) == pytest.approx(
+            100 / float_max
+        )
+        assert np.all(np.asarray(image)[200:205, 100:105] == 255)
 
     def test_far_cap_limits_range(self):
         depth = np.array([[0.3, 0.5], [2.0, 12.0]], dtype=np.float32)
@@ -558,9 +585,12 @@ def test_load_image_reads_depth_via_macos_and_rotates_it(tmp_path, monkeypatch):
     assert np.all(np.diff(column) > 0)
     assert portrait.depthmap.mode == "L"
     assert portrait.depthmap.size == (6, 8)
-    decoded_top = depth_raw_to_distance_cm(
-        portrait.depthmap.getpixel((3, 0)),
+    # A mid-ramp pixel round-trips; the ramp's extreme first row is nearer
+    # than the robust (3x3-median) near end and saturates at 255.
+    decoded_mid = depth_raw_to_distance_cm(
+        portrait.depthmap.getpixel((3, 4)),
         portrait.floatValueMin,
         portrait.floatValueMax,
     )
-    assert decoded_top == pytest.approx(portrait.depth_m[0, 3] * 100, abs=0.5)
+    assert decoded_mid == pytest.approx(portrait.depth_m[4, 3] * 100, abs=0.5)
+    assert portrait.depthmap.getpixel((3, 0)) == 255

@@ -40,16 +40,24 @@ def _pinhole_distance_ok(distance_cm):
     )
 
 
-def raw_depth_to_distance_cm(value, float_min, float_max, camera=None):
+def _zero_is_invalid(zero_is_invalid, camera):
+    # The file format decides (IOSPortrait.depth_code_zero_is_invalid); when
+    # the caller does not say, a camera implies a capture-app file.
+    return (camera is not None) if zero_is_invalid is None else bool(zero_is_invalid)
+
+
+def raw_depth_to_distance_cm(value, float_min, float_max, camera=None, *, zero_is_invalid=None):
     """:func:`depth_raw_to_distance_cm`, honouring the capture-app encoding.
 
-    With a ``camera`` (i.e. a capture-app file, see ``ios.load_image``) code
-    ``0`` means "no depth" and returns ``None``; without one (Camera-app
-    files) code 0 is a valid farthest depth, exactly as before.
+    In capture-app depth maps (``IOSPortrait.depth_code_zero_is_invalid``)
+    code ``0`` means "no depth" and returns ``None``; in Camera-app maps it
+    is a valid farthest depth, exactly as before. Pass
+    ``zero_is_invalid=portrait.depth_code_zero_is_invalid``; when it is
+    ``None`` a given ``camera`` implies a capture-app file.
     """
     if value is None:
         return None
-    if camera is not None and value == 0:
+    if _zero_is_invalid(zero_is_invalid, camera) and value == 0:
         return None
     return depth_raw_to_distance_cm(value, float_min, float_max)
 
@@ -186,6 +194,7 @@ def compute_incisor_distance_3d(
     image_height,
     *,
     camera=None,
+    zero_is_invalid=None,
 ):
     """Compute 3D Euclidean distance between upper and lower incisor centroids.
 
@@ -203,10 +212,16 @@ def compute_incisor_distance_3d(
     :param camera: optional :class:`portrait_analyser.camera.CameraModel`;
         ``None`` keeps the legacy calibration polynomial. With a camera, raw
         depth code 0 ("no depth" in capture-app files) yields None.
+    :param zero_is_invalid: ``portrait.depth_code_zero_is_invalid``; None =
+        infer from ``camera`` (see :func:`raw_depth_to_distance_cm`)
     :returns: (distance_3d_mm, upper_distance_cm, lower_distance_cm) or None
     """
-    upper_z_cm = raw_depth_to_distance_cm(upper_depth_raw, float_min, float_max, camera)
-    lower_z_cm = raw_depth_to_distance_cm(lower_depth_raw, float_min, float_max, camera)
+    upper_z_cm = raw_depth_to_distance_cm(
+        upper_depth_raw, float_min, float_max, camera, zero_is_invalid=zero_is_invalid
+    )
+    lower_z_cm = raw_depth_to_distance_cm(
+        lower_depth_raw, float_min, float_max, camera, zero_is_invalid=zero_is_invalid
+    )
 
     if upper_z_cm is None or lower_z_cm is None:
         return None

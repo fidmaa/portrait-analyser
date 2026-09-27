@@ -43,6 +43,7 @@ def compute_mouth_measurement_from_facemesh(
     float_max,
     *,
     camera=None,
+    zero_is_invalid=None,
 ):
     """Compute mouth opening from FaceMesh landmarks using depth map.
 
@@ -54,6 +55,9 @@ def compute_mouth_measurement_from_facemesh(
     :param float_max: EXIF FloatMaxValue
     :param camera: optional :class:`portrait_analyser.camera.CameraModel`;
         ``None`` keeps the legacy calibration polynomial
+    :param zero_is_invalid: ``portrait.depth_code_zero_is_invalid`` -- True
+        for capture-app depth maps, where code 0 means "no depth" and is
+        excluded from sampling; None = infer from ``camera``
     :returns: MouthMeasurement or None if computation fails
     """
     if len(landmarks) < max(_UPPER_LIP_OUTER, _LOWER_LIP_OUTER) + 1:
@@ -62,8 +66,10 @@ def compute_mouth_measurement_from_facemesh(
     upper_point = landmarks[_UPPER_LIP_OUTER]
     lower_point = landmarks[_LOWER_LIP_OUTER]
 
-    # Capture-app depth (camera given) encodes "no depth" as code 0.
-    invalid_value = 0 if camera is not None else None
+    # Capture-app depth encodes "no depth" as code 0 (decided by the file
+    # format; a camera alone implies a capture-app file).
+    zero_invalid = (camera is not None) if zero_is_invalid is None else bool(zero_is_invalid)
+    invalid_value = 0 if zero_invalid else None
     upper_depth_raw = sample_depth_at_point(
         depthmap, upper_point[0], upper_point[1], photo_w, photo_h, invalid_value=invalid_value
     )
@@ -91,6 +97,7 @@ def compute_mouth_measurement_from_facemesh(
             photo_w,
             photo_h,
             camera=camera,
+            zero_is_invalid=zero_invalid,
         )
         if result_3d is not None:
             distance_3d_mm, upper_distance_cm, lower_distance_cm = result_3d

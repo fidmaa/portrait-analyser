@@ -241,6 +241,8 @@ def test_inverted_depth_is_flagged_and_not_measured(
         portrait = ios.load_image(str(heic_face_image_path))
 
     assert portrait.depth_plausible is False
+    assert portrait.camera is None  # second line of defence
+    assert portrait.focal_length_px is not None  # still reported
     assert "implausible depth" in caplog.text
     assert portrait.incisor_distance_3d_mm is None
     assert portrait.incisor_measurement.distance_3d_mm is None
@@ -488,3 +490,86 @@ def test_semantic_matte_camera_app_layout_unchanged():
     )
     expected = Image.frombytes("L", (stride, height - 1), data)
     assert matte.tobytes() == expected.tobytes()
+
+
+def test_zero_rule_follows_file_format_not_camera():
+    """Relative capture-app files have no camera but code 0 is still invalid."""
+    from portrait_analyser.mouth import compute_mouth_measurement_from_facemesh
+
+    # Legacy semantics without a camera and without a format flag.
+    assert raw_depth_to_distance_cm(0, 0.34, 3.4) == pytest.approx(100 / 0.34)
+    assert raw_depth_to_distance_cm(0, 0.34, 3.4, zero_is_invalid=True) is None
+    camera = CameraModel(2766.0, 2766.0, 1512.0, 2016.0)
+    assert raw_depth_to_distance_cm(0, 0.34, 3.4, camera, zero_is_invalid=False) == (
+        pytest.approx(100 / 0.34)
+    )
+    assert (
+        compute_incisor_distance_3d(
+            (1500, 2200),
+            (1500, 2500),
+            0,
+            200,
+            0.34,
+            3.4,
+            3024,
+            4032,
+            zero_is_invalid=True,
+        )
+        is None
+    )
+    assert (
+        compute_tmd_3d(
+            (1500, 2600),
+            (1500, 3000),
+            200,
+            0,
+            0.34,
+            3.4,
+            3024,
+            4032,
+            zero_is_invalid=True,
+        )
+        is None
+    )
+
+    # Mouth: landmark 0 on a hole (code 0) surrounded by holes, landmark 17
+    # on valid depth -- no camera, but the file format says 0 is invalid.
+    depthmap = Image.new("L", (30, 40), 200)
+    for x in range(30):
+        for y in range(8):
+            depthmap.putpixel((x, y), 0)
+    landmarks = [(150.0, 250.0)] * 478
+    landmarks[0] = (150.0, 20.0)
+    landmarks[17] = (150.0, 300.0)
+    legacy = compute_mouth_measurement_from_facemesh(
+        landmarks, depthmap, 300, 400, 0.5, 4.0
+    )
+    assert legacy.upper_depth_raw == 0  # legacy: a real, farthest depth
+    capture_app = compute_mouth_measurement_from_facemesh(
+        landmarks, depthmap, 300, 400, 0.5, 4.0, zero_is_invalid=True
+    )
+    assert capture_app.upper_depth_raw is None
+    assert capture_app.distance_3d_mm is None
+
+
+def test_objc_bridge_errors_become_decode_errors(monkeypatch, tmp_path):
+    class FakeObjcError(Exception):
+        pass
+
+    monkeypatch.setattr(apple_depth, "_import_backend", lambda: (None, None, None))
+    monkeypatch.setattr(apple_depth, "_pyobjc_error_types", lambda: (FakeObjcError,))
+
+    def bridge_failure(*args):
+        raise FakeObjcError("NSInvalidArgumentException")
+
+    monkeypatch.setattr(apple_depth, "_read_apple_depth", bridge_failure)
+    with pytest.raises(AppleDepthDecodeError, match="FakeObjcError") as excinfo:
+        read_apple_depth(tmp_path / "x.heic")
+    assert isinstance(excinfo.value.__cause__, FakeObjcError)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="needs pyobjc")
+def test_pyobjc_error_type_is_objc_error():
+    import objc
+
+    assert apple_depth._pyobjc_error_types() == (objc.error,)

@@ -18,6 +18,7 @@ def compute_tmd_3d(
     image_height,
     *,
     camera=None,
+    zero_is_invalid=None,
 ):
     """Compute 3D thyromental distance (chin to neck midpoint).
 
@@ -32,10 +33,16 @@ def compute_tmd_3d(
     :param camera: optional :class:`portrait_analyser.camera.CameraModel`;
         ``None`` keeps the legacy calibration polynomial. With a camera, raw
         depth code 0 ("no depth" in capture-app files) yields None.
+    :param zero_is_invalid: ``portrait.depth_code_zero_is_invalid``; None =
+        infer from ``camera``
     :returns: (distance_3d_mm, chin_z_cm, neck_z_cm) or None
     """
-    chin_z_cm = raw_depth_to_distance_cm(chin_depth_raw, float_min, float_max, camera)
-    neck_z_cm = raw_depth_to_distance_cm(neck_depth_raw, float_min, float_max, camera)
+    chin_z_cm = raw_depth_to_distance_cm(
+        chin_depth_raw, float_min, float_max, camera, zero_is_invalid=zero_is_invalid
+    )
+    neck_z_cm = raw_depth_to_distance_cm(
+        neck_depth_raw, float_min, float_max, camera, zero_is_invalid=zero_is_invalid
+    )
 
     if chin_z_cm is None or neck_z_cm is None:
         return None

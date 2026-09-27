@@ -174,9 +174,10 @@ class IOSPortrait:
     def camera(self):
         """:class:`~portrait_analyser.camera.CameraModel` from the file intrinsics, or None.
 
-        Only for capture-app files with *absolute* depth whose depth map
-        could be aligned with the photo; ``None`` otherwise (all Camera-app
-        files, relative depth), which keeps the calibration polynomial.
+        Only for capture-app files with *absolute*, plausible depth whose
+        depth map could be aligned with the photo; ``None`` otherwise (all
+        Camera-app files, relative depth, ``depth_plausible is False``),
+        which keeps the calibration polynomial.
 
         Pass it as ``camera=`` to the metric functions (``pixel_to_mm`` via
         ``focal_px``/``principal_px``, ``compute_incisor_distance_3d``,
@@ -563,6 +564,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         if focal_length_px is not None
         and principal_point_px is not None
         and depth_accuracy == "absolute"
+        and depth_plausible is not False
         else None
     )
 
@@ -649,6 +651,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                         photo_w,
                         photo_h,
                         camera=camera,
+                        zero_is_invalid=zero_invalid,
                     )
                     if legacy_3d is not None:
                         incisor_distance_3d_mm = legacy_3d[0]
@@ -718,6 +721,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                             photo_w,
                             photo_h,
                             camera=camera,
+                            zero_is_invalid=zero_invalid,
                         )
                         if result_3d is not None:
                             distance_3d_mm, upper_distance_cm, lower_distance_cm = (

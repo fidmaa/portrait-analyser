@@ -84,12 +84,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     `depth_plausible = False`, nothing measured.
   - The camera (pinhole) model is only used for `"absolute"` depth; relative
     capture-app depth stays on the polynomial with a warning.
-  - The 8-bit encoding's near end is the 0.1st percentile of valid depths
-    (`NEAR_PERCENTILE`); nearer pixels saturate at 255, so one stray pixel
-    no longer coarsens the quantisation.
+  - The 8-bit encoding's near end is the minimum of the 3x3 NaN-aware median
+    of valid depths (`NEAR_END_MEDIAN_SIZE`); nearer pixels (< 1 mm on real
+    captures) saturate at 255, so one stray pixel no longer coarsens the
+    quantisation while the nose tip is kept (IMG_2346: 29.49 vs raw min
+    29.39 cm; a 0.1st percentile would clip it to 30.37 cm).
   - `read_apple_depth` turns unexpected pyobjc shapes (Attribute/Index/Key/
     Type/ValueError) into `AppleDepthDecodeError`; a Camera-app load never
     fails because of it (logged, `depth_accuracy = None`).
+  - `portrait.camera` / `CameraModel.from_portrait()` return None when
+    `depth_plausible is False` (second line of defence).
+  - Whether code 0 is invalid follows the file format, not camera presence:
+    `compute_incisor_distance_3d`, `compute_tmd_3d`,
+    `compute_mouth_measurement_from_facemesh` and `raw_depth_to_distance_cm`
+    take keyword-only `zero_is_invalid=None` (pass
+    `portrait.depth_code_zero_is_invalid`; None infers it from `camera`), so
+    relative capture-app files are covered too.
+  - pyobjc's own `objc.error` is also reported as `AppleDepthDecodeError`.
   - `CameraModel` gains optional `width`/`height` (the image its intrinsics
     refer to, i.e. the full-resolution photo).
   - pyobjc lower bound raised to 12.2 (the tested version).

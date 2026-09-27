@@ -80,8 +80,37 @@ MAX_PLAUSIBLE_DEPTH_M = 20.0
 # which the downstream code already ignores as zero disparity.
 DISPARITY_FAR_CAP_M = 3.0
 
-# Percentile of valid depths used as the near end of the 8-bit encoding.
-NEAR_PERCENTILE = 0.1
+# Near end of the 8-bit encoding: the minimum of the NaN-aware 3x3 median of
+# the depth map. A single stray near pixel cannot survive a 3x3 median, while
+# a real surface (the nose tip) keeps its depth almost exactly. Measured on
+# the capture-app files: IMG_2346 raw min 29.39 cm -> 29.49 cm (percentiles
+# clip more: 0.005th 29.65, 0.01st 29.89, 0.1st 30.37 cm); IMG_2347 24.57 ->
+# 24.62 cm (0.1st percentile: 25.00 cm). Pixels nearer than this (< 1 mm)
+# saturate at code 255.
+NEAR_END_MEDIAN_SIZE = 3
+
+
+def _robust_near_depth(depth, valid):
+    """Minimum of the NaN-aware ``NEAR_END_MEDIAN_SIZE`` median of valid depths."""
+    masked = np.where(valid, depth, np.nan)
+    half = NEAR_END_MEDIAN_SIZE // 2
+    padded = np.pad(masked, half, constant_values=np.nan)
+    height, width = masked.shape
+    windows = np.stack(
+        [
+            padded[dy : dy + height, dx : dx + width]
+            for dy in range(NEAR_END_MEDIAN_SIZE)
+            for dx in range(NEAR_END_MEDIAN_SIZE)
+        ]
+    )
+    counts = np.isfinite(windows).sum(axis=0)
+    # nanmedian warns on all-NaN windows; those are invalid pixels anyway.
+    windows[:, counts == 0] = np.inf
+    median = np.nanmedian(windows, axis=0)
+    finite = np.isfinite(median) & valid
+    if not finite.any():
+        return float(depth[valid].min())
+    return float(median[finite].min())
 
 
 @dataclass
@@ -247,9 +276,17 @@ def read_apple_depth(path: Union[str, "Path"]) -> Optional[AppleDepthData]:
         the EXIF one -- surfaced with context rather than swallowed.
     """
     Quartz, AVFoundation, NSURL = _import_backend()
+    unexpected = (
+        AttributeError,
+        IndexError,
+        KeyError,
+        TypeError,
+        ValueError,
+        *_pyobjc_error_types(),
+    )
     try:
         return _read_apple_depth(Quartz, AVFoundation, NSURL, str(path))
-    except (AttributeError, IndexError, KeyError, TypeError, ValueError) as exc:
+    except unexpected as exc:
         # pyobjc bridges (e.g. intrinsicMatrix()'s nested tuples, CGSize
         # attributes) can change shape across macOS / pyobjc versions; any
         # such surprise is a decode failure of this file, reported with
@@ -258,6 +295,18 @@ def read_apple_depth(path: Union[str, "Path"]) -> Optional[AppleDepthData]:
             f"unexpected ImageIO/AVFoundation data while reading depth from "
             f"{str(path)!r}: {type(exc).__name__}: {exc}"
         ) from exc
+
+
+def _pyobjc_error_types() -> tuple:
+    """``(objc.error,)`` -- pyobjc's own bridge error -- or ``()`` without pyobjc."""
+    try:
+        import objc
+    except ImportError:
+        # No pyobjc-core means no bridge calls, so no objc.error can occur;
+        # _import_backend has already raised AppleDepthUnavailable in that
+        # case outside tests that stub the backend.
+        return ()
+    return (objc.error,)
 
 
 def _calibration_to_intrinsics(calibration):
@@ -390,9 +439,10 @@ def encode_depth_as_disparity_8bit(
     ``disparity = float_max * v / 255 + float_min * (1 - v / 255)`` and
     ``Z_cm = 100 / disparity``). This produces exactly that representation:
 
-    * ``float_max = 1 / Z_near`` with ``Z_near`` the
-      :data:`NEAR_PERCENTILE` percentile of valid depths (robust against a
-      single stray near pixel; nearer pixels saturate at code 255);
+    * ``float_max = 1 / Z_near`` with ``Z_near`` the minimum of the 3x3
+      NaN-aware median of valid depths (robust against a single stray near
+      pixel, see :data:`NEAR_END_MEDIAN_SIZE`; nearer pixels saturate at
+      code 255);
     * ``float_min = 1 / Z_far`` with ``Z_far = min(largest valid depth,
       far_cap_m)``;
     * ``v = round(255 * (1/Z - float_min) / (float_max - float_min))``.
@@ -435,7 +485,7 @@ def encode_depth_as_disparity_8bit(
     # A robust near end: one stray near pixel must not stretch the code range
     # (and so coarsen the quantisation) for the whole map. Pixels nearer than
     # this saturate at code 255 (they decode as Z_near).
-    z_near = float(np.percentile(depth[valid], NEAR_PERCENTILE))
+    z_near = _robust_near_depth(depth, valid)
     z_far = min(float(depth[valid].max()), float(far_cap_m))
     float_max = 1.0 / z_near
     # A perfectly flat map has no range to spread; with float_min = 0 every

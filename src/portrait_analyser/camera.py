@@ -71,14 +71,19 @@ class CameraModel:
         Returns ``None`` when the portrait carries no usable intrinsics --
         which, deliberately, includes every legacy Camera-app photo (their
         measurements keep using the calibration polynomial) -- or when its
-        depth is not ``"absolute"``: relative depth has an unknown scale, so
-        a metric pinhole conversion would only look precise.
+        depth is not ``"absolute"`` (relative depth has an unknown scale, so
+        a metric pinhole conversion would only look precise) or
+        ``depth_plausible is False``.
         """
         focal = getattr(portrait, "focal_length_px", None)
         principal = getattr(portrait, "principal_point_px", None)
         if focal is None or principal is None:
             return None
         if getattr(portrait, "depth_accuracy", None) != "absolute":
+            return None
+        if getattr(portrait, "depth_plausible", None) is False:
+            # Second line of defence: implausible (e.g. inverted) depth must
+            # not be measured, even by a caller that forgot to check.
             return None
         photo = getattr(portrait, "photo", None)
         width, height = (None, None) if photo is None else photo.size

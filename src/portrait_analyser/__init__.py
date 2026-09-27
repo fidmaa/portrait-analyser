@@ -1,6 +1,6 @@
 from .apple_depth import (
     DISPARITY_FAR_CAP_M,
-    NEAR_PERCENTILE,
+    NEAR_END_MEDIAN_SIZE,
     AppleDepthData,
     encode_depth_as_disparity_8bit,
     read_apple_depth,
@@ -96,7 +96,7 @@ __all__ = [
     "pixels_per_mm_at_distance",
     "point_to_mm",
     "raw_depth_to_distance_cm",
-    "NEAR_PERCENTILE",
+    "NEAR_END_MEDIAN_SIZE",
     "check_depth_plausibility",
     "ExifValidationFailed",
     "Eye",
