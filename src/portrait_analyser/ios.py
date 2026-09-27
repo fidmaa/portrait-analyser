@@ -615,16 +615,17 @@ def repair_inverted_depth(depth_m, skinmap, hairmap=None, *, focal_px=None, phot
     :func:`check_depth_plausibility`.
 
     Both interpretations -- the map as read and its reciprocal -- are judged
-    on the face alone, with the file's focal length:
-
-    * the face (skin-matte median depth) must lie within
-      :data:`PLAUSIBLE_FACE_DEPTH_CM`, and
-    * the face width (:func:`face_width_px`, converted at that depth) must be
-      a human face width (:data:`PLAUSIBLE_FACE_WIDTH_CM`).
+    on the face alone, with the file's focal length. The face width
+    (:func:`face_width_px`, converted at the skin-median depth) must be a
+    human face width (:data:`PLAUSIBLE_FACE_WIDTH_CM`) -- the only test for
+    the map as read, so a correct capture with the face 1-1.3 m away (outside
+    the distance window, but 15 cm wide) is never "repaired" -- and the
+    reciprocal must in addition put the face within
+    :data:`PLAUSIBLE_FACE_DEPTH_CM`.
 
     The reciprocal is returned only when the map as read fails
     :func:`check_depth_plausibility`, the reciprocal interpretation passes
-    both face tests and the as-read one does not. Ambiguous (both pass) or
+    and the as-read one does not. Ambiguous (both pass) or
     hopeless (neither passes) maps are left alone, as is everything without
     ``focal_px`` or a face blob.
 
@@ -671,13 +672,18 @@ def repair_inverted_depth(depth_m, skinmap, hairmap=None, *, focal_px=None, phot
         return None, check
     check.as_read_face_width_cm = width_px * skin_cm / focal_px
     check.reciprocal_face_width_cm = width_px * r_skin_cm / focal_px
-    as_read_ok = _interpretation_ok(skin_cm, check.as_read_face_width_cm)
+    # The map as read is judged by the face WIDTH alone: a correct capture
+    # with the face 1.0-1.3 m away fails the 15-100 cm distance window, and
+    # its reciprocal (77-100 cm) would pass it -- the width (15 cm as read,
+    # ~10 cm "repaired") is what tells them apart. Real inverted files are
+    # 97-117 cm wide as read.
+    as_read_ok = _width_ok(check.as_read_face_width_cm)
     reciprocal_ok = _interpretation_ok(r_skin_cm, check.reciprocal_face_width_cm)
     if as_read_ok and reciprocal_ok:
         check.reason = "face distance and width are plausible both ways (ambiguous)"
         return None, check
     if as_read_ok:
-        check.reason = "face distance and width are plausible as read; not repaired"
+        check.reason = "face width is plausible as read; not repaired"
         return None, check
     if not reciprocal_ok:
         check.reason = "face distance or width is implausible both ways"
@@ -824,6 +830,12 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         # Every measurement samples this float map; the 8-bit image is only
         # for display (and for pre-0.8 callers of depthmap/floatValueMin/Max).
         depth = FloatDepthMap(depth_m, picture_image.size)
+        # The face's distance sets the physical scale of the integration
+        # smoothing (a near foreground must not shrink it).
+        if depth_aligned:
+            _, subject_cm, _ = check_depth_plausibility(depth_m, skin_image, hair_image)
+            if subject_cm is not None:
+                depth.subject_depth_m = subject_cm / 100.0
         try:
             depth_image, float_min, float_max = depth.display_encoding()
         except ValueError as exc:

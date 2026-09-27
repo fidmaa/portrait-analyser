@@ -601,7 +601,7 @@ def compute_neck_circumference(
     # This smooths TrueDepth sensor noise before it can accumulate across
     # the many points walked along the arc -- the same fix applied to
     # fidmaa-gui's surface_vector_filtered() for straight-line measurements.
-    # Float (capture-app) depth: the integration map (median + 2 mm Gaussian,
+    # Float (capture-app) depth: the integration map (median + 6 mm bilateral,
     # see depth_map.INTEGRATION_SIGMA_MM). Legacy: the same median-filtered
     # map as before, bit for bit.
     arc_depth = depth.integration_map(camera) if depth.is_float else filtered_depthmap

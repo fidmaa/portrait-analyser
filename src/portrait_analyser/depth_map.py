@@ -34,7 +34,7 @@ needs::
 Integration along paths (``profile``, ``surface_length_mm``, the neck arc):
 legacy maps use the 3x3 median exactly as before; float maps -- unfiltered
 TrueDepth depth with ~1 mm per-pixel jitter -- always go through
-:meth:`DepthMap.integration_map` (3x3 median + edge-preserving 2 mm Gaussian,
+:meth:`DepthMap.integration_map` (3x3 median + edge-preserving 6 mm bilateral,
 see :data:`INTEGRATION_SIGMA_MM`), whichever variant they are called on.
 
 All coordinates are photo-space pixels of the full-resolution upright photo
@@ -59,6 +59,7 @@ app) only need a ``(rows, cols)`` metres array aligned with the photo:
 
 from __future__ import annotations
 
+import itertools
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -89,30 +90,30 @@ FLOAT_DETECTOR_FAR_M = 3.0
 FLOAT_DETECTOR_CODE_RANGE = (1.0 / FLOAT_DETECTOR_FAR_M, 1.0 / FLOAT_DETECTOR_NEAR_M)
 
 # Smoothing of float (unfiltered TrueDepth) depth before anything integrates
-# along it (surface lengths, profiles, the neck arc). Measured on
-# IMG_2346/2347/2348: the residual of depth against a local quadratic on
-# 11x11-pixel cheek/forehead patches is ~0.8-1.1 mm per pixel (Apple-filtered
-# Camera-app depth: 0.2-0.4 mm), and one depth pixel spans ~0.9 mm on a face
-# at 38 cm, so per-sample jitter comparable to the lateral step accumulates
-# as fake relief along a walked path. A NaN-aware Gaussian with a 2 mm
-# (physical) spatial sigma -- edge-preserving: bilateral, see
-# INTEGRATION_RANGE_SIGMA_MM -- applied after the 3x3 median, suppresses that jitter
-# roughly eightfold while leaving centimetre-scale anatomy intact (nose
-# relief along the nasal bridge and across the eyes is unchanged to within
-# 1 mm). The sigma is converted to depth pixels with the camera's focal
-# length at the subject's median depth; without a camera
-# DEFAULT_INTEGRATION_SIGMA_PX is used (~2 mm at 35-40 cm).
-INTEGRATION_SIGMA_MM = 2.0
-# Range sigma of that (bilateral) smoothing: neighbours whose depth differs
-# from the centre by several times this weigh ~nothing, so the silhouette
-# edge is not blended with the background (a plain Gaussian pulled neck-edge
-# depths towards a wall 1 m behind). 5 mm keeps symmetric weights on facial
-# slopes (unbiased on a linear ramp).
-INTEGRATION_RANGE_SIGMA_MM = 5.0
-DEFAULT_INTEGRATION_SIGMA_PX = 2.3
-# Percentile of valid depth taken as the subject's distance for that
-# conversion.
-SUBJECT_DEPTH_PERCENTILE = 10.0
+# along it (surface lengths, profiles, the neck arc). Unfiltered TrueDepth
+# depth has ~1 mm per-pixel jitter (residual vs a local quadratic on 11x11
+# cheek/forehead patches: 0.8-1.1 mm; Apple-filtered Camera-app depth
+# 0.2-0.4 mm) *plus* mid-frequency relief of +-2-4 mm correlated over
+# 5-10 mm, which a walked path integrates as fake surface. Calibrated on a
+# flat ChArUco board (IMG_2376, PnP-verified, 6 lines of 50-100 mm): with the
+# 3x3 median only, surface/linear = 1.09-1.21; with this bilateral filter
+# (spatial sigma 6 mm, range sigma 20 mm) 1.010-1.022. Curvature on
+# synthetic noise-free ground truth: a r = 40 mm sphere's arc over +-0.8 r
+# comes out 2.0 % short (apex moved back 0.7 mm), a r = 60 mm cylinder's
+# 0.4 % short; with realistic noise both are within +-1 % on average.
+# The spatial sigma is converted to depth pixels with the camera's focal
+# length at the subject's distance (``FloatDepthMap.subject_depth_m``, set by
+# load_image to the skin-matte median); without a camera
+# DEFAULT_INTEGRATION_SIGMA_PX is used (~6 mm at 38 cm).
+INTEGRATION_SIGMA_MM = 6.0
+# Range sigma: neighbours differing from the centre by several times this
+# weigh ~nothing, so a silhouette (a jump of tens of cm) is never blended
+# with the background, while the few-mm noise relief is averaged out.
+INTEGRATION_RANGE_SIGMA_MM = 20.0
+DEFAULT_INTEGRATION_SIGMA_PX = 7.0
+# Pixels farther than this are left unsmoothed (background; keeps the
+# filter's internal range table fine-grained for the subject).
+INTEGRATION_FAR_M = 3.0
 
 
 @dataclass(frozen=True)
@@ -313,7 +314,7 @@ def surface_length_mm(depth, points, photo_width, photo_height, *, camera=None):
 
     return sum(
         vector_length_3d(*point_1, *point_2)
-        for point_1, point_2 in zip(points_3d, points_3d[1:])
+        for point_1, point_2 in itertools.pairwise(points_3d)
     )
 
 
@@ -470,6 +471,9 @@ class FloatDepthMap(DepthMap):
         self._source = None
         self.smoothing = None
         self._integration_cache = {}
+        # Subject (face) distance in metres for the smoothing scale; set by
+        # load_image, None = estimate from the map centre.
+        self.subject_depth_m = None
 
     @property
     def shape(self):
@@ -619,26 +623,31 @@ class FloatDepthMap(DepthMap):
     def _root(self):
         return self if self._source is None else self._source
 
-    def integration_sigma_px(self, camera=None):
-        """Gaussian sigma in depth pixels for :data:`INTEGRATION_SIGMA_MM`.
-
-        ``sigma_mm * f_depth / Z_subject`` with ``f_depth`` the camera's
-        focal length expressed in depth pixels and ``Z_subject`` the
-        :data:`SUBJECT_DEPTH_PERCENTILE` th percentile of valid depth;
-        :data:`DEFAULT_INTEGRATION_SIGMA_PX` without a camera.
-        """
-        if camera is None:
-            return DEFAULT_INTEGRATION_SIGMA_PX
-        depth = self._root().depth_m
-        valid = depth[np.isfinite(depth)]
+    def subject_distance_m(self):
+        """Distance of the measured subject in metres: :attr:`subject_depth_m`
+        when set (load_image: the skin-matte median), else the median valid
+        depth in the central third of the map. Never a whole-map percentile,
+        so a near foreground cannot shrink the smoothing."""
+        root = self._root()
+        if root.subject_depth_m is not None:
+            return float(root.subject_depth_m)
+        rows, cols = root.shape
+        centre = root.depth_m[rows // 3 : 2 * rows // 3, cols // 3 : 2 * cols // 3]
+        valid = centre[np.isfinite(centre)]
         if valid.size == 0:
+            valid = root.depth_m[np.isfinite(root.depth_m)]
+        return float(np.median(valid)) if valid.size else None
+
+    def integration_sigma_px(self, camera=None):
+        """Spatial sigma in depth pixels for :data:`INTEGRATION_SIGMA_MM`:
+        ``sigma_mm * f_depth / Z_subject`` (``f_depth`` = the camera's focal
+        length in depth pixels, ``Z_subject`` = :meth:`subject_distance_m`);
+        :data:`DEFAULT_INTEGRATION_SIGMA_PX` without a camera."""
+        z_subject = self.subject_distance_m()
+        if camera is None or z_subject is None:
             return DEFAULT_INTEGRATION_SIGMA_PX
-        # The subject is the nearest large surface: the 10th percentile of
-        # valid depth (a median would drift to a near wall behind the head).
-        z_ref_mm = float(np.percentile(valid, SUBJECT_DEPTH_PERCENTILE)) * 1000.0
-        cols = self.shape[1]
-        focal_depth_px = camera.fx * cols / self.photo_size[0]
-        return INTEGRATION_SIGMA_MM * focal_depth_px / z_ref_mm
+        focal_depth_px = camera.fx * self.shape[1] / self.photo_size[0]
+        return INTEGRATION_SIGMA_MM * focal_depth_px / (z_subject * 1000.0)
 
     def integration_map(self, camera=None):
         if isinstance(self.smoothing, tuple):
@@ -649,6 +658,7 @@ class FloatDepthMap(DepthMap):
         if cached is None:
             median = root.median_filtered(3)
             cached = FloatDepthMap(_nan_bilateral(median.depth_m, sigma_px), root.photo_size)
+            cached.subject_depth_m = root.subject_depth_m
             cached._source = root
             cached.smoothing = ("integration", sigma_px)
             root._integration_cache[sigma_px] = cached
@@ -684,37 +694,37 @@ class FloatDepthMap(DepthMap):
         return self.display_encoding()[0]
 
 
-def _nan_bilateral(depth, sigma_px, sigma_range_m=None):
-    """NaN-aware bilateral smoothing of a metres map.
+def _nan_bilateral(depth, sigma_px, sigma_range_m=None, far_m=None):
+    """NaN-aware bilateral smoothing of a metres map (OpenCV).
 
-    Spatial Gaussian of ``sigma_px`` (truncated at 2 sigma) times a range
+    Spatial Gaussian of ``sigma_px`` (window radius 2 sigma) times a range
     Gaussian of ``sigma_range_m`` on the depth difference to the centre
-    pixel, so a face pixel next to the silhouette is never averaged with the
-    background behind it. Invalid pixels stay NaN and contribute nothing.
+    pixel. Invalid pixels and pixels beyond ``far_m`` are replaced by a
+    sentinel 50 range-sigmas beyond ``far_m`` (zero weight for the subject),
+    and get their original value (NaN / unsmoothed) back afterwards.
     """
+    import cv2
+
     if sigma_range_m is None:
         sigma_range_m = INTEGRATION_RANGE_SIGMA_MM / 1000.0
-    valid = np.isfinite(depth)
+    if far_m is None:
+        far_m = INTEGRATION_FAR_M
     if sigma_px <= 0:
         return depth.copy()
+    valid = np.isfinite(depth)
+    with np.errstate(invalid="ignore"):
+        smoothable = valid & (depth <= far_m)
+    sentinel = far_m + 50.0 * sigma_range_m
+    work = np.where(smoothable, depth, sentinel).astype(np.float32)
+    # OpenCV tabulates the range kernel over the image's own min..max; an
+    # extra row pinned to 0 and the sentinel makes that table (and so the
+    # result) independent of the file's nearest/farthest pixel. The row is far
+    # outside every subject pixel's range kernel.
+    anchor = np.full((1, work.shape[1]), sentinel, dtype=np.float32)
+    anchor[0, 0] = 0.0
+    work = np.vstack([work, anchor])
     radius = max(1, math.ceil(2.0 * sigma_px))
-    rows, cols = depth.shape
-    padded = np.pad(np.where(valid, depth, np.nan), radius, constant_values=np.nan)
-    centre = np.where(valid, depth, 0.0)
-    total = np.zeros(depth.shape)
-    weights = np.zeros(depth.shape)
-    for dy in range(-radius, radius + 1):
-        for dx in range(-radius, radius + 1):
-            spatial = math.exp(-(dx * dx + dy * dy) / (2.0 * sigma_px * sigma_px))
-            if spatial < math.exp(-2.0):
-                continue  # outside the 2-sigma disc
-            shifted = padded[radius + dy : radius + dy + rows, radius + dx : radius + dx + cols]
-            ok = np.isfinite(shifted)
-            diff = np.where(ok, shifted - centre, 0.0)
-            weight = np.where(ok, spatial * np.exp(-(diff * diff) / (2 * sigma_range_m**2)), 0.0)
-            total += weight * np.where(ok, shifted, 0.0)
-            weights += weight
-    with np.errstate(divide="ignore", invalid="ignore"):
-        smoothed = total / weights
-    smoothed[~valid | (weights <= 0)] = np.nan
-    return smoothed
+    filtered = cv2.bilateralFilter(work, 2 * radius + 1, sigma_range_m, sigma_px)[:-1]
+    result = np.where(smoothable, filtered.astype(np.float64), depth)
+    result[~valid] = np.nan
+    return result

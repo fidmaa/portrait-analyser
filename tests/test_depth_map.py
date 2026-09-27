@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from portrait_analyser import apple_depth, ios
 from portrait_analyser.apple_depth import encode_depth_as_disparity_8bit
@@ -133,7 +133,10 @@ class TestLegacyFloatAgreement:
     def test_profile_and_detector_scale(self):
         legacy, flt = _both(_ramp_depth())
         points = [(x, 300.0) for x in range(20, 380, 40)]
-        np.testing.assert_allclose(flt.profile(points), legacy.profile(points), atol=0.25)
+        raw_profile = [flt.bilinear_cm(x, y) for x, y in points]
+        np.testing.assert_allclose(raw_profile, legacy.profile(points), atol=0.25)
+        # The float profile integrates over the smoothed map: close, not equal.
+        np.testing.assert_allclose(flt.profile(points), raw_profile, atol=1.0)
         # Detector scale: the fixed reference range, not the file's own.
         fmin, fmax = FLOAT_DETECTOR_CODE_RANGE
         expected = np.clip(255 * (1 / _ramp_depth() - fmin) / (fmax - fmin), 1, 255)
@@ -142,8 +145,13 @@ class TestLegacyFloatAgreement:
     def test_neck_circumference_agrees(self):
         depth, skin = _neck_scene()
         legacy, flt = _both(depth)
-        old = compute_neck_circumference(skin, None, *PHOTO, None, None, depth=legacy, **NECK_KW)
-        new = compute_neck_circumference(skin, None, *PHOTO, None, None, depth=flt, **NECK_KW)
+        # With the camera the float arc is smoothed at a physical 6 mm scale.
+        old = compute_neck_circumference(
+            skin, None, *PHOTO, None, None, camera=CAMERA, depth=legacy, **NECK_KW
+        )
+        new = compute_neck_circumference(
+            skin, None, *PHOTO, None, None, camera=CAMERA, depth=flt, **NECK_KW
+        )
         assert old is not None and new is not None
         assert new.neck_y == old.neck_y
         assert new.front_arc_length_mm == pytest.approx(old.front_arc_length_mm, rel=0.03)
@@ -253,7 +261,7 @@ class TestIntegrationSmoothing:
         disc = z_axis**2 - a * (z_axis**2 - radius**2)
         z_row = np.where(disc >= 0, (z_axis - np.sqrt(np.maximum(disc, 0))) / a, 1500.0)
         depth = np.tile(z_row / 1000.0, (rows, 1))
-        depth = (depth + rng.normal(0, 0.001, depth.shape)).astype(np.float32)
+        depth = (depth + self._correlated_noise(rng, depth.shape, corr_mm=1.5)).astype(np.float32)
         flt = FloatDepthMap(depth, self.SIZE)
         # Walk the front arc between X = -0.8 R and +0.8 R.
         angle = math.asin(0.8)
@@ -262,6 +270,62 @@ class TestIntegrationSmoothing:
         u1 = self.CAM.cx + 0.8 * radius * self.CAM.fx / z_edge
         points = list(sample_points_along_line(u0, 2016.0, u1, 2016.0, 6.3))
         true_arc = 2 * radius * angle
+        assert flt.surface_length_mm(points, camera=self.CAM) == pytest.approx(true_arc, rel=0.03)
+
+    def _correlated_noise(self, rng, shape, white_mm=1.0, corr_mm=2.0, length_mm=7.0):
+        """TrueDepth-like noise: 1 mm white + mid-frequency relief correlated
+        over ~7 mm (the kind a flat board shows), in metres."""
+        import cv2
+
+        focal_depth = self.CAM.fx * shape[1] / self.SIZE[0]
+        relief = cv2.GaussianBlur(rng.normal(0, 1, shape), (0, 0), length_mm * focal_depth / 400)
+        relief *= corr_mm / relief.std()
+        return (rng.normal(0, white_mm, shape) + relief) / 1000.0
+
+    def _rays(self):
+        rows, cols = self.DEPTH_SHAPE
+        u = np.arange(cols) * (self.SIZE[0] - 1) / (cols - 1)
+        v = np.arange(rows) * (self.SIZE[1] - 1) / (rows - 1)
+        return np.meshgrid((u - self.CAM.cx) / self.CAM.fx, (v - self.CAM.cy) / self.CAM.fy)
+
+    def _front_arc_points(self, radius, z_centre):
+        angle = math.asin(0.8)
+        z_edge = z_centre - radius * math.cos(angle)
+        half = 0.8 * radius * self.CAM.fx / z_edge
+        points = list(
+            sample_points_along_line(
+                self.CAM.cx - half, self.CAM.cy, self.CAM.cx + half, self.CAM.cy, 6.3
+            )
+        )
+        return points, 2 * radius * angle
+
+    def test_flat_board_with_correlated_noise(self):
+        rng = np.random.default_rng(7)
+        tx, _ = self._rays()
+        z = 0.40 / (1 - 0.3 * tx)  # a board tilted ~17 degrees
+        noisy = (z + self._correlated_noise(rng, z.shape)).astype(np.float32)
+        flt = FloatDepthMap(noisy, self.SIZE)
+        flt.subject_depth_m = 0.40
+        for x_from, x_to in ((-50, 50), (-40, 60), (-60, 20)):
+            points = self._walk(x_from, x_to, 400)
+            smooth = flt.integration_map(self.CAM)
+            linear = smooth.distance_3d_mm(points[0], points[-1], camera=self.CAM, radius=0)[0]
+            assert flt.surface_length_mm(points, camera=self.CAM) / linear < 1.03
+
+    @pytest.mark.parametrize("noisy", [False, True])
+    def test_sphere_keeps_its_curvature(self, noisy):
+        # r = 40 mm, like a nose tip / forehead; apex at 40 cm.
+        radius, z_centre = 40.0, 440.0
+        tx, ty = self._rays()
+        a = 1 + tx**2 + ty**2
+        disc = z_centre**2 - a * (z_centre**2 - radius**2)
+        z = np.where(disc >= 0, (z_centre - np.sqrt(np.maximum(disc, 0))) / a, 1500.0) / 1000
+        if noisy:
+            z = z + self._correlated_noise(np.random.default_rng(8), z.shape, corr_mm=1.5)
+        flt = FloatDepthMap(z.astype(np.float32), self.SIZE)
+        flt.subject_depth_m = 0.40
+        points, true_arc = self._front_arc_points(radius, z_centre)
+        # Noise-free: the 6 mm smoothing rounds the sphere by ~2 %.
         assert flt.surface_length_mm(points, camera=self.CAM) == pytest.approx(true_arc, rel=0.03)
 
     def test_same_map_whichever_variant_is_used(self):
@@ -275,11 +339,11 @@ class TestIntegrationSmoothing:
         ) == flt.surface_length_mm(points)
 
     def test_silhouette_is_not_blended_with_the_background(self):
-        depth, _ = _neck_scene()
+        depth = np.full((ROWS, COLS), 1.5, dtype=np.float32)
+        depth[:, 12:29] = 0.35  # a flat subject before a wall 1.15 m behind
         smooth = FloatDepthMap(depth, PHOTO).integration_map()
-        # Edge column of the neck: still at neck depth, not pulled to 1.5 m.
-        assert smooth.depth_m[30, 12] == pytest.approx(depth[30, 12], abs=0.002)
-        assert smooth.depth_m[30, 5] == pytest.approx(1.5, abs=1e-6)
+        assert smooth.depth_m[30, 12] == pytest.approx(0.35, abs=1e-4)
+        assert smooth.depth_m[30, 11] == pytest.approx(1.5, abs=1e-4)
 
     def test_legacy_integration_map_is_the_median_filter(self):
         legacy, _ = _both(_ramp_depth())
@@ -507,6 +571,32 @@ class TestRepairInvertedDepth:
         assert repaired is None
         assert check.reason == "depth as read is not implausible"
 
+    @pytest.mark.parametrize("z_m", [1.0, 1.1, 1.26])
+    def test_correct_far_face_is_never_repaired(self, z_m):
+        # A correct capture, face 15 cm wide at 1.0-1.26 m before a 2.5 m
+        # wall: as read it fails the 15-100 cm window (or sits on its edge),
+        # its reciprocal (79-100 cm) would pass it -- but the width as read
+        # is a face width, so nothing may be "repaired".
+        photo = (3024, 4032)
+        focal = 2766.0
+        width_px = 15.0 / (z_m * 100) * focal
+        height_px = 21.0 / (z_m * 100) * focal
+        skin = Image.new("L", (photo[0] // 4, photo[1] // 4), 0)
+        cx, cy = photo[0] / 8, photo[1] / 8
+        ImageDraw.Draw(skin).ellipse(
+            (cx - width_px / 8, cy - height_px / 8, cx + width_px / 8, cy + height_px / 8),
+            fill=255,
+        )
+        depth = np.full((640, 480), 2.5, dtype=np.float32)
+        depth[np.asarray(skin.resize((480, 640))) >= 128] = z_m
+        depth[450:, :] = 0.6  # plus a near foreground
+        repaired, check = ios.repair_inverted_depth(
+            depth, skin, focal_px=focal, photo_size=photo
+        )
+        assert repaired is None, check
+        if check.as_read_face_width_cm is not None:
+            assert check.as_read_face_width_cm == pytest.approx(15.0, rel=0.05)
+
     def test_both_interpretations_fail(self):
         # As read: 1.5 m face (implausible). Reciprocal 67 cm: plausible
         # distance, but a 231 px face there is 27 cm wide -- not a face.
@@ -524,7 +614,7 @@ class TestRepairInvertedDepth:
         assert repaired is None
         assert 10 <= check.as_read_face_width_cm <= 25
         assert check.reciprocal_face_width_cm < 10
-        assert "implausible both ways" in check.reason
+        assert "plausible as read" in check.reason
 
     def test_correct_depth_with_near_foreground_is_not_repaired(self):
         # Correct map, but a board held in front (non-skin nearer than the

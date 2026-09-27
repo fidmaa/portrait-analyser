@@ -42,10 +42,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   values are metres, so it reads as `1/depth` (IMG_2348/2363/2376: face at
   2.4-2.7 m). When absolute capture-app depth fails the plausibility check,
   both interpretations are judged on the face alone with the file's focal
-  length: skin-median distance within 15-100 cm *and* face width
-  (`face_width_px()`: minor axis of the skin matte's largest blob) within
-  `PLAUSIBLE_FACE_WIDTH_CM` (10-25 cm). Only if the reciprocal passes and the
-  map as read does not, `load_image` uses the reciprocal, sets
+  length. The reciprocal must put the face (skin median) within 15-100 cm
+  *and* give a face width (`face_width_px()`: minor axis of the skin
+  matte's largest blob) within `PLAUSIBLE_FACE_WIDTH_CM` (10-25 cm); the map
+  as read is judged by the face width alone, so a correct capture with the
+  face 1.0-1.3 m away (outside the distance window, reciprocal 77-100 cm) is
+  never "repaired". Only if the reciprocal passes and the map as read does
+  not, `load_image` uses the reciprocal, sets
   `depth_repaired = "metres stored under a disparity label (iOS 26)"`
   (`DEPTH_REPAIRED_RECIPROCAL`) and `depth_plausible = True`, logs the
   evidence, and derives display image, camera and measurements from the
@@ -82,18 +85,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unvalidated (experimental).
 - Float depth is smoothed before anything integrates along it:
   `DepthMap.integration_map(camera)` = 3x3 NaN-aware median + NaN-aware
-  bilateral filter (2 mm spatial sigma via the file's focal length,
-  `INTEGRATION_SIGMA_MM`; 5 mm range sigma so the silhouette is not blended
-  with the background). `FloatDepthMap.profile()` / `surface_length_mm()`
-  (and `measure_filtered_surface_length(depth=...)`) and the float neck arc
-  always use it; legacy maps keep the plain median filter. Unfiltered
-  TrueDepth skin shows ~1 mm per-pixel jitter (Apple-filtered Camera-app
-  depth 0.2-0.4 mm). Effect on the FaceMesh eye-corner line (33 -> 263):
-  IMG_2346 159.4 -> 151.6 mm, IMG_2347 153.7 -> 146.2 mm, IMG_2348 136.3 ->
-  129.9 mm (linear 101.0 / 95.5 / 96.4 mm); forehead lines drop 5-7 %, flat
-  cheek lines stay within 1-3 % of linear and nose relief is unchanged. The
-  remaining surface/linear ratio on the eye line (~1.35-1.53) is real relief
-  (36-39 mm nose-bridge depth over ~100 mm), not noise.
+  bilateral filter (spatial sigma 6 mm via the file's focal length at the
+  subject's distance -- `FloatDepthMap.subject_depth_m`, set by `load_image`
+  to the skin-matte median, so a near foreground cannot shrink it --
+  `INTEGRATION_SIGMA_MM`; range sigma 20 mm, `INTEGRATION_RANGE_SIGMA_MM`, so
+  silhouettes are never blended with the background; pixels beyond 3 m are
+  left unsmoothed). `FloatDepthMap.profile()` / `surface_length_mm()`,
+  `measure_filtered_surface_length(depth=...)` and the float neck arc always
+  use it; legacy maps keep the plain median filter. Unfiltered TrueDepth
+  depth shows ~1 mm per-pixel jitter plus +-2-4 mm relief correlated over
+  5-10 mm. Calibrated on a flat, PnP-verified ChArUco board (IMG_2376, six
+  100-150 mm lines): surface/linear 1.21-1.40 with the median only,
+  1.010-1.022 now. FaceMesh eye-corner line (33 -> 263) surface/linear:
+  IMG_2346 1.70 -> 1.31, IMG_2347 1.63 -> 1.37, IMG_2348 1.45 -> 1.25
+  (Apple-filtered Camera-app depth ~1.29); forehead lines 1.26-1.28 ->
+  1.07-1.10; short cheek lines 1.00-1.02.
+  - Limitations: the smoothing rounds tight curvature -- a noise-free
+    r = 40 mm sphere's arc over +-0.8 r comes out 2.0 % short (apex 0.7 mm
+    back), a r = 60 mm cylinder's 0.4 % short; features narrower than
+    ~6 mm (lips, eyelids, the nasal ridge) are flattened. Surfaces seen at
+    grazing angles and depth steps below ~40 mm are partly averaged across.
+    The board is the only real ground truth so far.
 - Float neck arcs return None when more than `MAX_DROPPED_ARC_FRACTION`
   (20 %) of the arc points have no depth (legacy unchanged).
 
