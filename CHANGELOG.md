@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `apple_depth` module: `read_apple_depth()` reads Apple's embedded
+  depth/disparity data via macOS ImageIO + AVFoundation (pyobjc), for HEIC
+  files whose depth aux image is 16-bit JPEG-compressed disparity -- a
+  format `pyheif`/`pyheif-iplweb` and current `pillow-heif` cannot decode
+  ("Unsupported JPEG data precision 16" / "JPEG decoder plugin not built
+  in"). Returns an `AppleDepthData` (metres, accuracy, filtered, quality,
+  source type, intrinsics, EXIF orientation) or `None` when a file has no
+  depth/disparity aux image at all. macOS-only: raises
+  `AppleDepthUnavailable` elsewhere or when pyobjc isn't installed;
+  `AppleDepthDecodeError` on a genuine decode failure. Adds
+  `pyobjc-framework-Quartz` / `pyobjc-framework-AVFoundation` as
+  `sys_platform == 'darwin'` dependencies, matching the existing
+  `pyheif-iplweb` convention. `load_image()`'s own pyheif-based path is
+  unchanged; a later task will use `read_apple_depth()` as a fallback there
+  and add the depth-map rotation `AppleDepthData.exif_orientation` calls
+  for (the map is returned in sensor orientation, undocumented until then).
+
 ## [0.6.2] - 2026-09-27
 
 ### Added

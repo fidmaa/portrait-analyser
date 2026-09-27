@@ -1,3 +1,4 @@
+from .apple_depth import AppleDepthData, read_apple_depth
 from .depth_sampling import (
     bilinear_sample,
     measure_filtered_surface_length,
@@ -6,6 +7,8 @@ from .depth_sampling import (
     sample_points_along_line,
 )
 from .exceptions import (
+    AppleDepthDecodeError,
+    AppleDepthUnavailable,
     ExifValidationFailed,
     MultipleFacesDetected,
     NoDepthMapFound,
@@ -65,6 +68,10 @@ from .extended_neck import (
 )
 
 __all__ = [
+    "AppleDepthData",
+    "AppleDepthDecodeError",
+    "AppleDepthUnavailable",
+    "read_apple_depth",
     "ExifValidationFailed",
     "Eye",
     "Face",

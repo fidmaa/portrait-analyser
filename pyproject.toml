@@ -34,6 +34,8 @@ dependencies = [
     "mediapipe>=0.10.0",
     "pyheif-iplweb>=0.7.1.dev1176; sys_platform == 'darwin'",
     "pyheif>=0.7.1; sys_platform == 'linux'",
+    "pyobjc-framework-quartz>=10.0 ; sys_platform == 'darwin'",
+    "pyobjc-framework-avfoundation>=10.0 ; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
