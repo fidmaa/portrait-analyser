@@ -97,7 +97,7 @@ Attributes:
 - `depth` -- `DepthMap` to measure with (see "Depth map" below): wraps the 8-bit map for Camera-app files and the full-precision float map for TrueDepth capture-app files
 - `depthmap` -- depth map as PIL Image (for capture-app files a display-only 8-bit re-encoding; never measure with it)
 - `depth_m` -- full-precision depth in metres (capture-app files only, else `None`)
-- `depth_plausible` / `depth_repaired` -- sanity check of capture-app depth, and how it was repaired on load (`"reciprocal (depth stored as disparity)"` or `None`)
+- `depth_plausible` / `depth_repaired` -- sanity check of capture-app depth, and how it was repaired on load (`"metres stored under a disparity label (iOS 26)"` or `None`), with the evidence in `depth_repair_check`
 - `teethmap` -- teeth segmentation mask (PIL Image or `None`)
 - `skinmap` -- skin segmentation mask (PIL Image or `None`)
 - `teeth_bbox` -- bounding box `(x, y, width, height)` of detected teeth, or `None`
@@ -199,9 +199,10 @@ depth.to_display_image()   # 8-bit, display only
 ```
 
 - `LegacyDepthMap(image, float_min, float_max, photo_size, *, zero_is_invalid=False)` -- the Camera-app 8-bit disparity map; samples exactly like `sample_depth_at_point` / `median_filter_depthmap` / `sample_filtered_depth`, so results are unchanged.
-- `FloatDepthMap(depth_m, photo_size)` -- full-precision metres (NaN, `<= 0` and `> 20 m` invalid), NaN-aware medians and bilinear sampling, no quantisation, no far cap.
+- `FloatDepthMap(depth_m, photo_size)` -- full-precision metres (NaN, `<= 0` and `> 20 m` invalid), NaN-aware medians and bilinear sampling, no quantisation, no far cap. `profile()` and `surface_length_mm()` integrate over `integration_map(camera)` (3x3 median + edge-preserving 2 mm smoothing) because unfiltered TrueDepth depth jitters by ~1 mm per pixel.
 - Measurement functions (`compute_incisor_distance_3d`, `compute_tmd_3d`, `compute_mouth_measurement_from_facemesh`, `compute_neck_circumference`, `compute_neck_width_3d`, `detect_neck_midpoint_from_dual_mask`, `measure_filtered_surface_length`) take a keyword-only `depth=` DepthMap; the old `depthmap`/`float_min`/`float_max` arguments keep working unchanged.
-- `repair_inverted_depth(depth_m, skinmap, hairmap=None)` -- returns `1 / depth_m` when a capture-app map is implausible but its reciprocal is clearly plausible (depth written into a disparity buffer); `load_image` applies it automatically to absolute capture-app depth.
+- `repair_inverted_depth(depth_m, skinmap, hairmap=None, *, focal_px=None, photo_size=None)` -- returns `(1 / depth_m, check)` when a capture-app map is implausible but the reciprocal puts the face at a plausible distance *and* width (with the file's focal length) while the map as read does not -- iOS 26 writes metres under a disparity label; `load_image` applies it automatically to absolute capture-app depth.
+- Automatic neck circumference on capture-app photos is unvalidated (experimental).
 
 ### Robust surface-distance measurement (`depth_sampling` module)
 

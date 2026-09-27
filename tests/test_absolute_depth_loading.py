@@ -241,7 +241,8 @@ def test_inverted_depth_is_repaired_by_reciprocal(
     with caplog.at_level(logging.WARNING, logger="portrait_analyser.ios"):
         portrait = ios.load_image(str(heic_face_image_path))
 
-    assert portrait.depth_repaired == ios.DEPTH_REPAIRED_RECIPROCAL
+    assert portrait.depth_repair_check is not None, caplog.text
+    assert portrait.depth_repaired == ios.DEPTH_REPAIRED_RECIPROCAL, portrait.depth_repair_check
     assert portrait.depth_plausible is True
     assert "repaired" in caplog.text
     np.testing.assert_allclose(portrait.depth_m, 1.0 / depth, rtol=1e-6)
@@ -308,6 +309,59 @@ def test_capture_app_measures_on_float_depth_not_display_image(
     assert portrait.incisor_measurement == reference.incisor_measurement
     assert portrait.incisor_distance_3d_mm == reference.incisor_distance_3d_mm
     assert portrait.depth.distance_cm(1100, 1700) == reference.depth.distance_cm(1100, 1700)
+
+
+@pytest.mark.parametrize("orientation", [3, 6, 8])
+def test_float_depth_map_is_aligned_for_exif_orientation(
+    monkeypatch, heic_face_image_path, fixture_mattes, orientation
+):
+    depth = _depth_map(fixture_mattes, face_m=0.35, background_m=1.8)
+    # A marker patch in the upright frame (top-left quadrant).
+    depth[100:110, 60:70] = 0.5
+    _patch_capture_app(monkeypatch, depth, orientation=orientation)
+
+    portrait = ios.load_image(str(heic_face_image_path))
+
+    assert portrait.depth.is_float
+    np.testing.assert_array_equal(portrait.depth.depth_m, depth.astype(np.float64))
+    photo_w, photo_h = portrait.photo.size
+    marker_x = 65 * (photo_w - 1) / (SENSOR_H - 1)
+    marker_y = 105 * (photo_h - 1) / (SENSOR_W - 1)
+    assert portrait.depth.distance_cm(marker_x, marker_y) == pytest.approx(50.0)
+    # Point-symmetric position (bottom-right) is not the marker.
+    assert portrait.depth.distance_cm(photo_w - 1 - marker_x, photo_h - 1 - marker_y) != (
+        pytest.approx(50.0)
+    )
+
+
+def test_inverted_depth_without_skin_matte_is_not_repaired(
+    monkeypatch, heic_face_image_path, fixture_mattes
+):
+    depth = _depth_map(fixture_mattes, face_m=2.7, background_m=0.55)
+    _patch_capture_app(monkeypatch, depth)
+    _patch_teeth(monkeypatch)
+    decode = ios._decode_semantic_map
+    calls = []
+
+    def no_skin(raw):
+        calls.append(raw)
+        # load_image decodes teeth, skin, hair in this order.
+        return None if len(calls) == 2 else decode(raw)
+
+    monkeypatch.setattr(ios, "_decode_semantic_map", no_skin)
+    portrait = ios.load_image(str(heic_face_image_path))
+
+    assert portrait.skinmap is None
+    assert portrait.depth_plausible is None  # cannot be judged
+    assert portrait.depth_repaired is None
+    assert portrait.depth_repair_check is None
+    assert portrait.camera is not None
+    # The pinhole working range (10-150 cm) is the backstop: the teeth sit at
+    # 2.7 m as read, so nothing is measured.
+    measurement = portrait.incisor_measurement
+    assert measurement.upper_distance_cm is None
+    assert measurement.distance_3d_mm is None
+    assert portrait.incisor_distance_3d_mm is None
 
 
 def test_relative_inverted_depth_is_not_repaired(

@@ -20,7 +20,6 @@ from PIL import ImageFilter
 from .incisor import depth_raw_to_distance_cm, point_to_mm, vector_length_3d  # noqa: F401
 
 
-
 def median_filter_depthmap(depthmap, size=3):
     """Return a same-size, single-channel median-filtered depth map."""
     if size < 3 or size % 2 == 0:
@@ -137,7 +136,8 @@ def measure_filtered_surface_length(
     :param depth: optional, already filtered
         :class:`portrait_analyser.depth_map.DepthMap`, e.g.
         ``portrait.depth.median_filtered()``; when given, depth is read from
-        it (full precision for capture-app files) instead of
+        it (full precision, smoothed by ``integration_map`` for capture-app
+        files) instead of
         ``filtered_depthmap``/``float_min``/``float_max``
     :returns: total length in millimeters, or None if fewer than 2 points
         were given, or any point falls on invalid depth, or any point lies
@@ -147,4 +147,6 @@ def measure_filtered_surface_length(
 
     if depth is None:
         depth = LegacyDepthMap(filtered_depthmap, float_min, float_max, (photo_width, photo_height))
-    return surface_length_mm(depth, points_photo, photo_width, photo_height, camera=camera)
+        return surface_length_mm(depth, points_photo, photo_width, photo_height, camera=camera)
+    # Float maps integrate over their smoothed integration map.
+    return depth.surface_length_mm(points_photo, camera=camera)

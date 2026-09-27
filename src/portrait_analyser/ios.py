@@ -1,6 +1,8 @@
 import logging
+import math
 import sys
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from typing import Union
 
 import numpy as np
@@ -21,10 +23,10 @@ from .exceptions import (
 )
 from .face import (
     TEETH_MEASUREMENT_MIN_HEIGHT_FRACTION,
+    IncisorMeasurement,
     detect_teeth_arches,
     find_incisor_centroids,
     find_incisor_distance_teeth,
-    IncisorMeasurement,
     teeth_threshold,
 )
 from .incisor import depth_raw_to_distance_cm, distance_3d_from_cm
@@ -71,14 +73,16 @@ def _reconcile_weak_arch_depth(upper_raw, lower_raw, weak_side, float_min, float
     return upper_raw, upper_raw, "lower"
 
 
-def _reconcile_weak_arch_samples(upper, lower, weak_side):
+def _reconcile_weak_arch_samples(upper, lower, weak_side, calibrated=True):
     """:func:`_reconcile_weak_arch_depth` for ``DepthSample`` objects.
 
     Compares the samples' distances (for legacy 8-bit maps exactly the
     conversion the raw-code version uses) and, when the weak arch's depth is
     implausible, copies the strong arch's whole sample over it.
     """
-    if weak_side is None or upper is None or lower is None:
+    if weak_side is None or upper is None or lower is None or not calibrated:
+        # Like _reconcile_weak_arch_depth without float_min/float_max: no
+        # distances to compare, so nothing is replaced.
         return upper, lower, None
     upper_cm = upper.distance_cm
     lower_cm = lower.distance_cm
@@ -136,6 +140,7 @@ class IOSPortrait:
         depth_plausible=None,
         depth=None,
         depth_repaired=None,
+        depth_repair_check=None,
     ):
         self.photo = photo
         self.depthmap = depthmap
@@ -183,6 +188,9 @@ class IOSPortrait:
         # How the depth map was repaired on load, or None (never for
         # Camera-app files). See DEPTH_REPAIRED_RECIPROCAL.
         self.depth_repaired = depth_repaired
+        # DepthRepairCheck when the repair was evaluated (absolute
+        # capture-app depth that failed the plausibility check), else None.
+        self.depth_repair_check = depth_repair_check
         self._depth = depth
 
     @property
@@ -507,13 +515,75 @@ def check_depth_plausibility(depth_m, skinmap, hairmap=None):
 
 
 # ``IOSPortrait.depth_repaired`` value for a map repaired by taking 1/depth.
-DEPTH_REPAIRED_RECIPROCAL = "reciprocal (depth stored as disparity)"
+# Root cause (confirmed by the capture app's authors): iOS 26 on iPhone 17's
+# front TrueDepth camera writes HEIC depth labelled "disparity" whose values
+# are distances in metres; read as disparity it becomes 1/true_depth.
+DEPTH_REPAIRED_RECIPROCAL = "metres stored under a disparity label (iOS 26)"
 
-# For the reciprocal repair the background must lie at least this much
-# farther than the face (medians), so that only an unambiguous inversion is
-# repaired. Real inverted captures (IMG_2348/IMG_2363) give ~37-40 cm faces
-# against backgrounds 1.3-1.9 m away.
-REPAIR_MIN_BACKGROUND_MARGIN_CM = 10.0
+# Physical cross-check with the file intrinsics: the face's width (minor axis
+# of the skin matte's largest blob) must be a human face width at the
+# repaired depth and must not be one at the depth as read. Real captures:
+# 15.8-16.6 cm at the correct depth, 96-125 cm at its reciprocal.
+PLAUSIBLE_FACE_WIDTH_CM = (10.0, 25.0)
+# The face-width blob analysis runs on the matte resized to 1/4 of the photo.
+_FACE_WIDTH_DOWNSCALE = 4
+
+
+@dataclass
+class DepthRepairCheck:
+    """Evidence behind :func:`repair_inverted_depth`'s decision.
+
+    Distances in cm; widths computed as ``face_width_px * Z / focal_px`` at
+    the skin median depth of each interpretation. Fields are None when that
+    step was not reached.
+    """
+
+    repaired: bool
+    reason: str
+    as_read_skin_cm: float | None = None
+    as_read_background_cm: float | None = None
+    reciprocal_plausible: bool | None = None
+    reciprocal_skin_cm: float | None = None
+    reciprocal_background_cm: float | None = None
+    face_width_px: float | None = None
+    as_read_face_width_cm: float | None = None
+    reciprocal_face_width_cm: float | None = None
+
+
+def face_width_px(skinmap, photo_size=None):
+    """Width of the face in photo pixels from the skin matte, or None.
+
+    The minor axis (4 standard deviations) of the largest 8-connected blob of
+    skin pixels (matte >= 128). Orientation-free, so it also works for faces
+    lying sideways in a landscape frame, and not inflated by shoulders or
+    hands the way whole skin rows are.
+
+    :param skinmap: PIL "L" skin matte at any size
+    :param photo_size: ``(width, height)`` of the photo; the matte is first
+        resized to (a quarter of) it, since raw mattes need not share the
+        photo's aspect. Default: the matte's own pixels.
+    """
+    import cv2
+
+    matte = skinmap.convert("L")
+    scale = 1.0
+    if photo_size is not None:
+        work = (
+            max(1, photo_size[0] // _FACE_WIDTH_DOWNSCALE),
+            max(1, photo_size[1] // _FACE_WIDTH_DOWNSCALE),
+        )
+        matte = matte.resize(work, Image.Resampling.BILINEAR)
+        scale = photo_size[0] / work[0]
+    skin = (np.asarray(matte) >= _PLAUSIBILITY_MATTE_THRESHOLD).astype(np.uint8)
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(skin, connectivity=8)
+    if count < 2:
+        return None
+    largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    ys, xs = np.nonzero(labels == largest)
+    if xs.size < 3:
+        return None
+    minor_variance = float(np.linalg.eigvalsh(np.cov(np.vstack([xs, ys]).astype(np.float64)))[0])
+    return 4.0 * math.sqrt(max(minor_variance, 0.0)) * scale
 
 
 def _reciprocal_depth(depth_m):
@@ -526,41 +596,95 @@ def _reciprocal_depth(depth_m):
     return reciprocal
 
 
-def repair_inverted_depth(depth_m, skinmap, hairmap=None):
-    """Repair capture-app depth that was written inverted, if unambiguous.
+def _width_ok(width_cm):
+    low, high = PLAUSIBLE_FACE_WIDTH_CM
+    return width_cm is not None and low <= width_cm <= high
 
-    Some TrueDepth capture-app files store *depth* values (metres) in a
-    buffer labelled disparity, so reading them as disparity yields
-    ``1 / depth``: the face lands at ~2.5-2.7 m with the background at
-    ~0.55 m. Such a map fails :func:`check_depth_plausibility`, while its
-    reciprocal passes it with a wide margin.
 
-    The reciprocal is returned only when the map as read is implausible
-    (``False``, not merely unknown), the reciprocal is plausible, and the
-    reciprocal's background median is at least
-    :data:`REPAIR_MIN_BACKGROUND_MARGIN_CM` farther than its face median.
-    When both interpretations pass, both fail, or there is no background or
-    skin to judge by, nothing is repaired. Never apply this to Camera-app
-    (8-bit) depth.
+def _interpretation_ok(skin_cm, width_cm):
+    low, high = PLAUSIBLE_FACE_DEPTH_CM
+    return skin_cm is not None and low <= skin_cm <= high and _width_ok(width_cm)
+
+
+def repair_inverted_depth(depth_m, skinmap, hairmap=None, *, focal_px=None, photo_size=None):
+    """Repair capture-app depth written as metres under a disparity label.
+
+    iOS 26 on iPhone 17's front TrueDepth camera writes HEIC depth labelled
+    "disparity" whose values are metres, so reading it as disparity yields
+    ``1 / depth`` (face at ~2.4-2.9 m). Such a map fails
+    :func:`check_depth_plausibility`.
+
+    Both interpretations -- the map as read and its reciprocal -- are judged
+    on the face alone, with the file's focal length:
+
+    * the face (skin-matte median depth) must lie within
+      :data:`PLAUSIBLE_FACE_DEPTH_CM`, and
+    * the face width (:func:`face_width_px`, converted at that depth) must be
+      a human face width (:data:`PLAUSIBLE_FACE_WIDTH_CM`).
+
+    The reciprocal is returned only when the map as read fails
+    :func:`check_depth_plausibility`, the reciprocal interpretation passes
+    both face tests and the as-read one does not. Ambiguous (both pass) or
+    hopeless (neither passes) maps are left alone, as is everything without
+    ``focal_px`` or a face blob.
+
+    The background comparison of :func:`check_depth_plausibility` is only
+    recorded, never a veto: an object held in front of the face (e.g. a
+    calibration board, IMG_2376) makes "everything that is not skin or hair"
+    nearer than the face even in a correct map. A real far subject behind a
+    near foreground is refused by the face-width test instead (its face is a
+    few centimetres wide at the reciprocal depth).
+
+    Never apply this to Camera-app (8-bit) depth.
 
     :param depth_m: upright metres, NaN = invalid
-    :returns: ``(repaired_depth_m or None, reciprocal_check)`` where
-        ``reciprocal_check`` is ``check_depth_plausibility``'s tuple for the
-        reciprocal map (``(None, None, None)`` when it was not evaluated)
+    :param skinmap: skin matte (any size)
+    :param focal_px: horizontal focal length in photo pixels
+    :param photo_size: ``(width, height)`` of the photo ``focal_px`` refers
+        to (default: the matte's own size)
+    :returns: ``(repaired_depth_m or None, DepthRepairCheck)``
     """
-    plausible, _, _ = check_depth_plausibility(depth_m, skinmap, hairmap)
+    plausible, skin_cm, background_cm = check_depth_plausibility(depth_m, skinmap, hairmap)
+    check = DepthRepairCheck(
+        repaired=False,
+        reason="",
+        as_read_skin_cm=skin_cm,
+        as_read_background_cm=background_cm,
+    )
     if plausible is not False:
-        return None, (None, None, None)
+        check.reason = "depth as read is not implausible"
+        return None, check
     reciprocal = _reciprocal_depth(depth_m)
-    check = check_depth_plausibility(reciprocal, skinmap, hairmap)
-    r_plausible, r_skin_cm, r_background_cm = check
-    if (
-        r_plausible is True
-        and r_background_cm is not None
-        and r_background_cm - r_skin_cm >= REPAIR_MIN_BACKGROUND_MARGIN_CM
-    ):
-        return reciprocal, check
-    return None, check
+    r_plausible, r_skin_cm, r_background_cm = check_depth_plausibility(
+        reciprocal, skinmap, hairmap
+    )
+    check.reciprocal_plausible = r_plausible
+    check.reciprocal_skin_cm = r_skin_cm
+    check.reciprocal_background_cm = r_background_cm
+    if focal_px is None:
+        check.reason = "no focal length for the face-width check"
+        return None, check
+    width_px = face_width_px(skinmap, photo_size)
+    check.face_width_px = width_px
+    if width_px is None or r_skin_cm is None:
+        check.reason = "no face blob in the skin matte"
+        return None, check
+    check.as_read_face_width_cm = width_px * skin_cm / focal_px
+    check.reciprocal_face_width_cm = width_px * r_skin_cm / focal_px
+    as_read_ok = _interpretation_ok(skin_cm, check.as_read_face_width_cm)
+    reciprocal_ok = _interpretation_ok(r_skin_cm, check.reciprocal_face_width_cm)
+    if as_read_ok and reciprocal_ok:
+        check.reason = "face distance and width are plausible both ways (ambiguous)"
+        return None, check
+    if as_read_ok:
+        check.reason = "face distance and width are plausible as read; not repaired"
+        return None, check
+    if not reciprocal_ok:
+        check.reason = "face distance or width is implausible both ways"
+        return None, check
+    check.repaired = True
+    check.reason = "reciprocal face distance and width are plausible, as read they are not"
+    return reciprocal, check
 
 
 def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
@@ -638,6 +762,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
     # anything is measured with it.
     depth_plausible = None
     depth_repaired = None
+    depth_repair_check = None
     if depth_m is not None:
         if not depth_aligned:
             depth_plausible = False
@@ -646,19 +771,35 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                 depth_m, skin_image, hair_image
             )
             if depth_plausible is False and depth_accuracy == "absolute":
-                repaired, (_, fixed_skin_cm, fixed_background_cm) = repair_inverted_depth(
-                    depth_m, skin_image, hair_image
+                repaired, depth_repair_check = repair_inverted_depth(
+                    depth_m,
+                    skin_image,
+                    hair_image,
+                    focal_px=None if focal_length_px is None else focal_length_px[0],
+                    photo_size=picture_image.size,
                 )
-                if repaired is not None:
+                if repaired is None:
+                    logger.info(
+                        "%s: inverted-depth repair not applied: %s",
+                        fileName,
+                        depth_repair_check.reason,
+                    )
+                else:
+                    c = depth_repair_check
                     logger.warning(
                         "%s: depth looks inverted (skin median %.1f cm, background "
-                        "median %s cm); its reciprocal is plausible (skin %.1f cm, "
-                        "background %.1f cm) -- repaired as depth stored as disparity",
+                        "median %s cm, face width %.1f cm); its reciprocal is "
+                        "plausible (skin %.1f cm, background %s cm, face width "
+                        "%.1f cm) -- repaired as depth stored as disparity",
                         fileName,
                         skin_cm,
                         "n/a" if background_cm is None else f"{background_cm:.1f}",
-                        fixed_skin_cm,
-                        fixed_background_cm,
+                        c.as_read_face_width_cm,
+                        c.reciprocal_skin_cm,
+                        "n/a"
+                        if c.reciprocal_background_cm is None
+                        else f"{c.reciprocal_background_cm:.1f}",
+                        c.reciprocal_face_width_cm,
                     )
                     depth_m = repaired
                     depth_repaired = DEPTH_REPAIRED_RECIPROCAL
@@ -692,6 +833,9 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
             depth_image, float_min, float_max, picture_image.size, zero_is_invalid=False
         )
     measure_depth = depth_plausible is not False
+    depth_calibrated = depth.is_float or (
+        depth.float_min is not None and depth.float_max is not None
+    )
 
     # File intrinsics: only capture-app files with absolute, aligned depth.
     # None = calibration polynomial.
@@ -765,7 +909,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                     inward_y=1,
                 )
                 ld_upper, ld_lower, _ = _reconcile_weak_arch_samples(
-                    ld_upper, ld_lower, teeth_arches.weak_side
+                    ld_upper, ld_lower, teeth_arches.weak_side, depth_calibrated
                 )
                 if ld_upper is not None and ld_lower is not None:
                     legacy_3d = distance_3d_from_cm(
@@ -812,7 +956,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                     )
                     upper_sample, lower_sample, depth_assumed = (
                         _reconcile_weak_arch_samples(
-                            upper_sample, lower_sample, teeth_arches.weak_side
+                            upper_sample, lower_sample, teeth_arches.weak_side, depth_calibrated
                         )
                     )
                     # 8-bit codes (legacy maps only; None for float depth).
@@ -877,6 +1021,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         depth_plausible=depth_plausible,
         depth=depth,
         depth_repaired=depth_repaired,
+        depth_repair_check=depth_repair_check,
     )
 
 

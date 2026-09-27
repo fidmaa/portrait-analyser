@@ -36,18 +36,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   also accepts a `DepthMap`.
 - `incisor.distance_3d_from_cm()`: the shared two-point 3-D distance from
   known camera distances.
-- `repair_inverted_depth()` and `IOSPortrait.depth_repaired`: some
-  capture-app files store depth (metres) in a buffer labelled disparity, so
-  they read as `1/depth` (IMG_2348/IMG_2363: face at 2.5-2.7 m, background
-  at 0.53-0.57 m). When absolute capture-app depth fails the plausibility
-  check and its reciprocal passes it with the background at least
-  `REPAIR_MIN_BACKGROUND_MARGIN_CM` (10 cm) behind the face, `load_image`
-  uses the reciprocal, sets `depth_repaired = "reciprocal (depth stored as
-  disparity)"` (`DEPTH_REPAIRED_RECIPROCAL`) and `depth_plausible = True`,
-  logs a warning, and derives everything (display image, camera,
-  measurements) from the repaired map -- which also removes the posterised
-  face in the display image. Never for Camera-app or relative depth, nor
-  when both or neither interpretation is plausible.
+- `repair_inverted_depth()`, `IOSPortrait.depth_repaired` and
+  `IOSPortrait.depth_repair_check` (`DepthRepairCheck`). iOS 26 on iPhone
+  17's front TrueDepth camera writes HEIC depth labelled "disparity" whose
+  values are metres, so it reads as `1/depth` (IMG_2348/2363/2376: face at
+  2.4-2.7 m). When absolute capture-app depth fails the plausibility check,
+  both interpretations are judged on the face alone with the file's focal
+  length: skin-median distance within 15-100 cm *and* face width
+  (`face_width_px()`: minor axis of the skin matte's largest blob) within
+  `PLAUSIBLE_FACE_WIDTH_CM` (10-25 cm). Only if the reciprocal passes and the
+  map as read does not, `load_image` uses the reciprocal, sets
+  `depth_repaired = "metres stored under a disparity label (iOS 26)"`
+  (`DEPTH_REPAIRED_RECIPROCAL`) and `depth_plausible = True`, logs the
+  evidence, and derives display image, camera and measurements from the
+  repaired map (the posterised face in the display image is gone). The
+  background comparison is recorded but never vetoes (a board held in front
+  makes it fail on IMG_2376). Real files: face width 16.0-16.6 cm repaired vs
+  97-117 cm as read; correct files 15.8-16.2 cm. Never for Camera-app or
+  relative depth, without intrinsics or a face blob, or when both/neither
+  interpretation passes.
 - `apple_depth.disparity_encoding_range()`; `analyse-portrait` reports the
   measurement depth kind, plausibility and repair.
 
@@ -68,8 +75,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `portrait.depth.valid_mask` for the measurement map.
 - The chin/body/stable-edge/arc-sag detectors read a "detector scale" from
   the `DepthMap` (`code_array`, `bilinear_code`, `DepthSample.code`): the
-  stored 8-bit codes for Camera-app maps, the same scale unquantised for
-  float maps.
+  stored 8-bit codes for Camera-app maps; for float maps the same 0-255
+  disparity scale, unquantised, on the fixed `FLOAT_DETECTOR_CODE_RANGE`
+  (1/3 m .. 1/0.25 m) -- independent of the file's own range and of the
+  display encoding. Automatic neck circumference on capture-app files is
+  unvalidated (experimental).
+- Float depth is smoothed before anything integrates along it:
+  `DepthMap.integration_map(camera)` = 3x3 NaN-aware median + NaN-aware
+  bilateral filter (2 mm spatial sigma via the file's focal length,
+  `INTEGRATION_SIGMA_MM`; 5 mm range sigma so the silhouette is not blended
+  with the background). `FloatDepthMap.profile()` / `surface_length_mm()`
+  (and `measure_filtered_surface_length(depth=...)`) and the float neck arc
+  always use it; legacy maps keep the plain median filter. Unfiltered
+  TrueDepth skin shows ~1 mm per-pixel jitter (Apple-filtered Camera-app
+  depth 0.2-0.4 mm). Effect on the FaceMesh eye-corner line (33 -> 263):
+  IMG_2346 159.4 -> 151.6 mm, IMG_2347 153.7 -> 146.2 mm, IMG_2348 136.3 ->
+  129.9 mm (linear 101.0 / 95.5 / 96.4 mm); forehead lines drop 5-7 %, flat
+  cheek lines stay within 1-3 % of linear and nose relief is unchanged. The
+  remaining surface/linear ratio on the eye line (~1.35-1.53) is real relief
+  (36-39 mm nose-bridge depth over ~100 mm), not noise.
+- Float neck arcs return None when more than `MAX_DROPPED_ARC_FRACTION`
+  (20 %) of the arc points have no depth (legacy unchanged).
 
 ## [0.7.0] - 2026-09-27
 

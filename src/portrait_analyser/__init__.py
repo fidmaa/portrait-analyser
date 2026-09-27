@@ -57,8 +57,10 @@ from .incisor import (
 )
 from .ios import (
     DEPTH_REPAIRED_RECIPROCAL,
+    DepthRepairCheck,
     IOSPortrait,
     check_depth_plausibility,
+    face_width_px,
     load_image,
     repair_inverted_depth,
 )
@@ -107,6 +109,8 @@ __all__ = [
     "NEAR_END_MEDIAN_SIZE",
     "check_depth_plausibility",
     "repair_inverted_depth",
+    "DepthRepairCheck",
+    "face_width_px",
     "DEPTH_REPAIRED_RECIPROCAL",
     "DepthMap",
     "DepthSample",

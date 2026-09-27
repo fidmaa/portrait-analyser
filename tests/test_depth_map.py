@@ -6,10 +6,10 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from portrait_analyser import ios
+from portrait_analyser import apple_depth, ios
 from portrait_analyser.apple_depth import encode_depth_as_disparity_8bit
 from portrait_analyser.camera import CameraModel
-from portrait_analyser.depth_map import FloatDepthMap, LegacyDepthMap
+from portrait_analyser.depth_map import FLOAT_DETECTOR_CODE_RANGE, FloatDepthMap, LegacyDepthMap
 from portrait_analyser.depth_sampling import (
     measure_filtered_surface_length,
     median_filter_depthmap,
@@ -134,24 +134,200 @@ class TestLegacyFloatAgreement:
         legacy, flt = _both(_ramp_depth())
         points = [(x, 300.0) for x in range(20, 380, 40)]
         np.testing.assert_allclose(flt.profile(points), legacy.profile(points), atol=0.25)
-        # Detector scale: unquantised version of the 8-bit codes.
-        np.testing.assert_allclose(flt.code_array(), legacy.code_array(), atol=0.5 + 1e-6)
-        assert flt.bilinear_code(200, 300) == pytest.approx(legacy.bilinear_code(200, 300), abs=0.5)
+        # Detector scale: the fixed reference range, not the file's own.
+        fmin, fmax = FLOAT_DETECTOR_CODE_RANGE
+        expected = np.clip(255 * (1 / _ramp_depth() - fmin) / (fmax - fmin), 1, 255)
+        np.testing.assert_allclose(flt.code_array(), expected, rtol=1e-5)
 
     def test_neck_circumference_agrees(self):
-        depth = np.full((ROWS, COLS), 1.5, dtype=np.float32)
-        yy, xx = np.mgrid[0:ROWS, 0:COLS]
-        neck = (xx >= 12) & (xx <= 28)
-        depth[neck] = 0.33 + 0.002 * (xx[neck] - 20) ** 2
-        skin = Image.fromarray(np.where(np.repeat(np.repeat(neck, 10, 0), 10, 1), 255, 0)
-                               .astype(np.uint8)).resize(PHOTO)
+        depth, skin = _neck_scene()
         legacy, flt = _both(depth)
-        kwargs = dict(face_location=(100, 60, 200, 150), scan_start_y=250, scan_end_y=450)
-        old = compute_neck_circumference(skin, None, *PHOTO, None, None, depth=legacy, **kwargs)
-        new = compute_neck_circumference(skin, None, *PHOTO, None, None, depth=flt, **kwargs)
+        old = compute_neck_circumference(skin, None, *PHOTO, None, None, depth=legacy, **NECK_KW)
+        new = compute_neck_circumference(skin, None, *PHOTO, None, None, depth=flt, **NECK_KW)
         assert old is not None and new is not None
         assert new.neck_y == old.neck_y
         assert new.front_arc_length_mm == pytest.approx(old.front_arc_length_mm, rel=0.03)
+
+
+NECK_KW = {"face_location": (100, 60, 200, 150), "scan_start_y": 250, "scan_end_y": 450}
+
+
+def _neck_scene():
+    """A 17-pixel-wide rounded 'neck' at ~33 cm before a 1.5 m wall, and its skin matte."""
+    depth = np.full((ROWS, COLS), 1.5, dtype=np.float32)
+    _, xx = np.mgrid[0:ROWS, 0:COLS]
+    neck = (xx >= 12) & (xx <= 28)
+    depth[neck] = 0.33 + 0.002 * (xx[neck] - 20) ** 2
+    skin = Image.fromarray(
+        np.where(np.repeat(np.repeat(neck, 10, 0), 10, 1), 255, 0).astype(np.uint8)
+    )
+    return depth, skin
+
+
+class TestFloatDetectorScaleIsFixed:
+    def _neck(self, depth, skin):
+        m = compute_neck_circumference(
+            skin, None, *PHOTO, None, None, depth=FloatDepthMap(depth, PHOTO), **NECK_KW
+        )
+        assert m is not None
+        return (m.neck_y, m.left_x, m.right_x, m.front_arc_length_mm, m.arc_points_photo)
+
+    def test_display_constants_do_not_matter(self, monkeypatch):
+        depth, skin = _neck_scene()
+        reference = self._neck(depth, skin)
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("float detectors used the display encoding")
+
+        monkeypatch.setattr(apple_depth, "DISPARITY_FAR_CAP_M", 1.0)
+        monkeypatch.setattr(apple_depth, "NEAR_END_MEDIAN_SIZE", 7)
+        monkeypatch.setattr(apple_depth, "disparity_encoding_range", forbidden)
+        monkeypatch.setattr(apple_depth, "encode_depth_as_disparity_8bit", forbidden)
+        monkeypatch.setattr(
+            "portrait_analyser.depth_map.encode_depth_as_disparity_8bit", forbidden
+        )
+        assert self._neck(depth, skin) == reference
+
+    def test_file_near_and_far_ends_do_not_matter(self):
+        depth, skin = _neck_scene()
+        reference = self._neck(depth, skin)
+        # A stray near blob and a far wall away from the neck would have moved
+        # the old per-file code range (robust near end / far end).
+        changed = depth.copy()
+        changed[0:3, 0:3] = 0.12
+        changed[55:60, 35:40] = 9.0
+        assert self._neck(changed, skin) == reference
+
+    def test_codes_use_the_reference_range(self):
+        flt = FloatDepthMap(np.full((ROWS, COLS), 0.5, dtype=np.float32), PHOTO)
+        fmin, fmax = FLOAT_DETECTOR_CODE_RANGE
+        assert (fmin, fmax) == pytest.approx((1 / 3.0, 1 / 0.25))
+        assert flt.sample(200, 300).code == pytest.approx(255 * (2 - fmin) / (fmax - fmin))
+
+
+class TestIntegrationSmoothing:
+    """Float depth is smoothed (median + 2 mm bilateral) before integration."""
+
+    SIZE = (3024, 4032)
+    CAM = CameraModel(2766.0, 2766.0, 1512.0, 2016.0, width=3024, height=4032)
+    DEPTH_SHAPE = (640, 480)
+
+    def _pixel_rays(self):
+        cols = self.DEPTH_SHAPE[1]
+        u = (np.arange(cols) + 0.0) * (self.SIZE[0] - 1) / (cols - 1)
+        return (u - self.CAM.cx) / self.CAM.fx  # X/Z per depth column
+
+    def _walk(self, x_from_mm, x_to_mm, z_mm):
+        """Photo points along a row whose ends project from X at depth z."""
+        u0 = self.CAM.cx + x_from_mm * self.CAM.fx / z_mm
+        u1 = self.CAM.cx + x_to_mm * self.CAM.fx / z_mm
+        return list(sample_points_along_line(u0, 2016.0, u1, 2016.0, 6.3))
+
+    def test_noisy_plane_surface_equals_linear(self):
+        rng = np.random.default_rng(3)
+        rows = self.DEPTH_SHAPE[0]
+        # Tilted plane (10 % slope in X) at 40 cm with 1 mm white noise,
+        # the per-pixel noise measured on real capture-app skin.
+        slope = 0.10
+        ray = np.tile(self._pixel_rays(), (rows, 1))
+        z = 0.40 / (1 - slope * ray)
+        depth = (z + rng.normal(0, 0.001, z.shape)).astype(np.float32)
+        flt = FloatDepthMap(depth, self.SIZE)
+        points = self._walk(-50, 50, 400)
+        linear = flt.distance_3d_mm(points[0], points[-1], camera=self.CAM, radius=3)[0]
+        smoothed = flt.surface_length_mm(points, camera=self.CAM)
+        median_only = FloatDepthMap(flt.median_filtered().depth_m, self.SIZE)
+        from portrait_analyser.depth_map import surface_length_mm
+
+        unsmoothed = surface_length_mm(median_only, points, *self.SIZE, camera=self.CAM)
+        assert smoothed == pytest.approx(linear, rel=0.02)
+        assert unsmoothed > smoothed * 1.02  # the jitter it removes (~3 %)
+
+    def test_noisy_cylinder_keeps_its_arc(self):
+        rng = np.random.default_rng(4)
+        rows = self.DEPTH_SHAPE[0]
+        radius, z_axis = 60.0, 460.0  # mm: a neck-sized cylinder, front at 40 cm
+        ray = self._pixel_rays()
+        # Ray x = t * Z meets the cylinder x^2 + (Z - z_axis)^2 = R^2 (front).
+        a = 1 + ray**2
+        disc = z_axis**2 - a * (z_axis**2 - radius**2)
+        z_row = np.where(disc >= 0, (z_axis - np.sqrt(np.maximum(disc, 0))) / a, 1500.0)
+        depth = np.tile(z_row / 1000.0, (rows, 1))
+        depth = (depth + rng.normal(0, 0.001, depth.shape)).astype(np.float32)
+        flt = FloatDepthMap(depth, self.SIZE)
+        # Walk the front arc between X = -0.8 R and +0.8 R.
+        angle = math.asin(0.8)
+        z_edge = z_axis - radius * math.cos(angle)
+        u0 = self.CAM.cx - 0.8 * radius * self.CAM.fx / z_edge
+        u1 = self.CAM.cx + 0.8 * radius * self.CAM.fx / z_edge
+        points = list(sample_points_along_line(u0, 2016.0, u1, 2016.0, 6.3))
+        true_arc = 2 * radius * angle
+        assert flt.surface_length_mm(points, camera=self.CAM) == pytest.approx(true_arc, rel=0.03)
+
+    def test_same_map_whichever_variant_is_used(self):
+        flt = FloatDepthMap(_ramp_depth(), PHOTO)
+        assert flt.integration_map() is flt.median_filtered().integration_map()
+        points = [(100.0, 300.0), (200.0, 310.0), (300.0, 300.0)]
+        assert flt.surface_length_mm(points) == flt.median_filtered().surface_length_mm(points)
+        assert flt.profile(points) == flt.integration_map().profile(points)
+        assert measure_filtered_surface_length(
+            None, points, *PHOTO, None, None, depth=flt.median_filtered()
+        ) == flt.surface_length_mm(points)
+
+    def test_silhouette_is_not_blended_with_the_background(self):
+        depth, _ = _neck_scene()
+        smooth = FloatDepthMap(depth, PHOTO).integration_map()
+        # Edge column of the neck: still at neck depth, not pulled to 1.5 m.
+        assert smooth.depth_m[30, 12] == pytest.approx(depth[30, 12], abs=0.002)
+        assert smooth.depth_m[30, 5] == pytest.approx(1.5, abs=1e-6)
+
+    def test_legacy_integration_map_is_the_median_filter(self):
+        legacy, _ = _both(_ramp_depth())
+        assert np.array_equal(
+            np.asarray(legacy.integration_map().image),
+            np.asarray(median_filter_depthmap(legacy.image)),
+        )
+
+
+def test_float_neck_refuses_a_mostly_missing_arc():
+    depth, skin = _neck_scene()
+    flt = FloatDepthMap(depth, PHOTO)
+    assert compute_neck_circumference(skin, None, *PHOTO, None, None, depth=flt, **NECK_KW)
+    holed = depth.copy()
+    holed[:, 13:20] = np.nan  # ~40 % of the arc has no depth
+    flt_holed = FloatDepthMap(holed, PHOTO)
+    assert (
+        compute_neck_circumference(skin, None, *PHOTO, None, None, depth=flt_holed, **NECK_KW)
+        is None
+    )
+
+
+def test_lazy_portrait_depth():
+    photo = Image.new("RGB", PHOTO)
+    legacy_image = Image.new("RGB", (COLS, ROWS), (200, 200, 200))
+    legacy = ios.IOSPortrait(photo, legacy_image, floatValueMin=0.5, floatValueMax=3.5)
+    assert legacy.depth.kind == "legacy"
+    assert legacy.depth is legacy.depth  # built once
+    assert legacy.depth.distance_cm(10, 10) == depth_raw_to_distance_cm(200, 0.5, 3.5)
+    flt = ios.IOSPortrait(photo, depth_m=_ramp_depth())
+    assert flt.depth.kind == "float"
+    assert ios.IOSPortrait(photo).depth is None
+    replacement = FloatDepthMap(_ramp_depth(), PHOTO)
+    legacy.depth = replacement
+    assert legacy.depth is replacement
+
+
+def test_weak_arch_samples_untouched_without_calibration():
+    from portrait_analyser.depth_map import DepthSample
+
+    upper, lower = DepthSample(None, raw=200, code=200), DepthSample(None, raw=150, code=150)
+    assert ios._reconcile_weak_arch_samples(upper, lower, "upper", calibrated=False) == (
+        upper,
+        lower,
+        None,
+    )
+    # Calibrated but a distance is missing: the strong arch's sample is used.
+    assert ios._reconcile_weak_arch_samples(upper, lower, "upper") == (lower, lower, "upper")
 
 
 # --------------------------------------------------------------------------
@@ -269,7 +445,7 @@ def test_float_measurements_ignore_the_display_image(monkeypatch):
     assert before[0] is not None and before[-1] is not None
     # Corrupt the display image and make any further encoding explode.
     display = flt.to_display_image()
-    display.paste(0, (0, 0) + display.size)
+    display.paste(0, (0, 0, *display.size))
 
     def forbidden(*args, **kwargs):
         raise AssertionError("a float-depth measurement touched the 8-bit encoding")
@@ -285,57 +461,118 @@ def test_float_measurements_ignore_the_display_image(monkeypatch):
 # Inverted-depth repair (unit level)
 # --------------------------------------------------------------------------
 
+# Matte 40x60 for a 400x600 "photo"; a 20x40-pixel face blob has a minor axis
+# of 4 * 20 / sqrt(12) = 23.1 matte px = 231 photo px, i.e. ~15 cm at 37 cm
+# with this focal length -- and ~109 cm at 2.7 m.
+FOCAL = 570.0
+MATTE_PHOTO = (400, 600)
 
-def _mattes():
+
+def _mattes(box=(10, 10, 30, 50)):
     skin = Image.new("L", (COLS, ROWS), 0)
-    skin.paste(255, (10, 10, 30, 50))
+    skin.paste(255, box)
     return skin
 
 
-def _face_on(face_m, background_m):
+def _face_on(face_m, background_m, box=(10, 10, 30, 50)):
     depth = np.full((ROWS, COLS), background_m, dtype=np.float32)
-    depth[10:50, 10:30] = face_m
+    depth[box[1] : box[3], box[0] : box[2]] = face_m
     return depth
+
+
+def _repair(depth, skin, focal=FOCAL):
+    return ios.repair_inverted_depth(depth, skin, focal_px=focal, photo_size=MATTE_PHOTO)
 
 
 class TestRepairInvertedDepth:
     def test_reciprocal_plausible_is_repaired(self):
-        repaired, (plausible, skin_cm, background_cm) = ios.repair_inverted_depth(
-            _face_on(2.7, 0.57), _mattes()
-        )
+        repaired, check = _repair(_face_on(2.7, 0.57), _mattes())
         assert repaired is not None
-        assert plausible is True
-        assert skin_cm == pytest.approx(100 / 2.7, rel=1e-5)
-        assert background_cm == pytest.approx(100 / 0.57, rel=1e-5)
+        assert check.repaired is True
+        assert check.reciprocal_skin_cm == pytest.approx(100 / 2.7, rel=1e-5)
+        assert check.reciprocal_background_cm == pytest.approx(100 / 0.57, rel=1e-5)
+        assert check.face_width_px == pytest.approx(4 * 200 / math.sqrt(12), rel=0.05)
+        assert 10 <= check.reciprocal_face_width_cm <= 25
+        assert check.as_read_face_width_cm > 25
+
+    def test_background_does_not_veto(self):
+        # IMG_2376-like: a board held in front makes the non-skin median
+        # nearer than the face even after the repair.
+        repaired, check = _repair(_face_on(1 / 0.41, 1 / 0.39), _mattes())
+        assert repaired is not None
+        assert check.reciprocal_plausible is False  # background nearer than face
 
     def test_plausible_depth_is_never_repaired(self):
-        repaired, _ = ios.repair_inverted_depth(_face_on(0.37, 1.8), _mattes())
+        repaired, check = _repair(_face_on(0.37, 1.8), _mattes())
         assert repaired is None
+        assert check.reason == "depth as read is not implausible"
 
     def test_both_interpretations_fail(self):
-        # As read: 1.5 m face. Reciprocal: face behind the background.
-        repaired, (plausible, _, _) = ios.repair_inverted_depth(_face_on(1.5, 3.0), _mattes())
+        # As read: 1.5 m face (implausible). Reciprocal 67 cm: plausible
+        # distance, but a 231 px face there is 27 cm wide -- not a face.
+        repaired, check = _repair(_face_on(1.5, 3.0), _mattes())
         assert repaired is None
-        assert plausible is False
+        assert not check.repaired
 
-    def test_small_margin_is_ambiguous(self):
-        # Reciprocal face 40 cm, background 45 cm: plausible but not clear.
-        repaired, (plausible, _, _) = ios.repair_inverted_depth(
-            _face_on(1 / 0.40, 1 / 0.45), _mattes()
-        )
-        assert plausible is True
+    def test_far_subject_with_near_foreground_is_not_repaired(self):
+        # A real person 2 m away (face 4x6 matte px -> ~46 photo px, i.e.
+        # 16 cm at 2 m) behind a near foreground at 0.5 m. The reciprocal
+        # (face 50 cm, background 2 m) passes the distance tests, but the face
+        # would be 4 cm wide there.
+        box = (18, 27, 22, 33)
+        repaired, check = _repair(_face_on(2.0, 0.5, box), _mattes(box))
         assert repaired is None
+        assert 10 <= check.as_read_face_width_cm <= 25
+        assert check.reciprocal_face_width_cm < 10
+        assert "implausible both ways" in check.reason
 
-    def test_no_background_no_repair(self):
-        skin = Image.new("L", (COLS, ROWS), 255)
-        repaired, _ = ios.repair_inverted_depth(_face_on(2.7, 2.7), skin)
+    def test_correct_depth_with_near_foreground_is_not_repaired(self):
+        # Correct map, but a board held in front (non-skin nearer than the
+        # face) makes the plausibility check fail. As read, the face is at a
+        # plausible distance and width, so it must not be "repaired".
+        repaired, check = _repair(_face_on(0.37, 0.30), _mattes())
+        assert repaired is None
+        assert "plausible as read" in check.reason
+
+    def test_both_ways_plausible_is_ambiguous(self):
+        # Only Z = 1 m is its own reciprocal within 15-100 cm: a 1 m face in
+        # front of a 0.5 m foreground, 15 cm wide either way.
+        repaired, check = _repair(_face_on(1.0, 0.5), _mattes(), focal=1500.0)
+        assert repaired is None
+        assert "ambiguous" in check.reason
+
+    @pytest.mark.parametrize(
+        ("focal", "repaired_expected"),
+        [
+            # width_cm = 230.9 px * 37.04 cm / focal: 25 cm at focal ~342
+            # (as read, 2.7 m: > 180 cm either way).
+            (350.0, True),  # 24.4 cm -- inside
+            (335.0, False),  # 25.5 cm -- just outside
+        ],
+    )
+    def test_face_width_boundary(self, focal, repaired_expected):
+        repaired, check = _repair(_face_on(2.7, 0.57), _mattes(), focal=focal)
+        assert (repaired is not None) is repaired_expected, check
+
+    def test_without_focal_nothing_is_repaired(self):
+        repaired, check = _repair(_face_on(2.7, 0.57), _mattes(), focal=None)
+        assert repaired is None
+        assert "focal" in check.reason
+
+    def test_no_skin_no_repair(self):
+        repaired, _ = _repair(_face_on(2.7, 0.57), Image.new("L", (COLS, ROWS), 0))
         assert repaired is None
 
     def test_nan_stays_invalid(self):
         depth = _face_on(2.7, 0.57)
         depth[0, 0] = np.nan
         depth[0, 1] = 0.01  # reciprocal 100 m: beyond the sentinel cap
-        repaired, _ = ios.repair_inverted_depth(depth, _mattes())
+        repaired, _ = _repair(depth, _mattes())
         assert np.isnan(repaired[0, 0]) and np.isnan(repaired[0, 1])
         assert repaired[20, 20] == pytest.approx(1 / 2.7)
         assert not math.isnan(repaired[5, 5])
+
+    def test_face_width_is_orientation_free(self):
+        upright = ios.face_width_px(_mattes())
+        sideways = ios.face_width_px(_mattes().transpose(Image.Transpose.ROTATE_90))
+        assert sideways == pytest.approx(upright, rel=1e-6)

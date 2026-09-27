@@ -16,6 +16,11 @@ from .depth_map import DepthMap, LegacyDepthMap
 from .face import find_neck_measurement_point
 from .incisor import point_to_mm, vector_length_3d
 
+# Float-depth neck arcs: at most this fraction of the sampled points may be
+# dropped (invalid depth / outside the working range) before the measurement
+# is refused, since dropped points are bridged by straight chords.
+MAX_DROPPED_ARC_FRACTION = 0.2
+
 
 def _ellipse_circumference(a: float, b: float) -> float:
     """Approximate ellipse perimeter using Ramanujan's formula.
@@ -443,7 +448,16 @@ def compute_neck_circumference(
     :class:`~portrait_analyser.depth_map.DepthMap`) to measure capture-app
     files on their full-precision float depth; ``depthmap``/``float_min``/
     ``float_max`` are then ignored (may be None). Without it the 8-bit
-    ``depthmap`` is used exactly as before.
+    ``depthmap`` is used exactly as before. For float depth the arc is read
+    from ``depth.integration_map(camera)`` and the result is None when more
+    than :data:`MAX_DROPPED_ARC_FRACTION` of the arc points have no depth.
+
+    **Unvalidated on capture-app files**: the automatic neck location and the
+    edge/sag heuristics were tuned on Camera-app photos (8-bit code units;
+    float files use the fixed reference scale
+    ``depth_map.FLOAT_DETECTOR_CODE_RANGE``). Results on capture-app photos
+    have not been checked against tape measurements and are often
+    implausible -- treat them as experimental.
     """
     if depth is None:
         depth = LegacyDepthMap(depthmap, float_min, float_max, (photo_width, photo_height))
@@ -587,6 +601,10 @@ def compute_neck_circumference(
     # This smooths TrueDepth sensor noise before it can accumulate across
     # the many points walked along the arc -- the same fix applied to
     # fidmaa-gui's surface_vector_filtered() for straight-line measurements.
+    # Float (capture-app) depth: the integration map (median + 2 mm Gaussian,
+    # see depth_map.INTEGRATION_SIGMA_MM). Legacy: the same median-filtered
+    # map as before, bit for bit.
+    arc_depth = depth.integration_map(camera) if depth.is_float else filtered_depthmap
     arc_points_3d = []
     arc_points_photo = []
 
@@ -596,7 +614,7 @@ def compute_neck_circumference(
         sample_y = neck_y + round(amplitude * math.sin(math.pi * t))
 
         # Camera distance in cm (None where depth is missing / invalid).
-        z_cm = filtered_depthmap.bilinear_cm(sx, sample_y)
+        z_cm = arc_depth.bilinear_cm(sx, sample_y)
         if z_cm is None:
             continue
 
@@ -614,6 +632,13 @@ def compute_neck_circumference(
 
     # Need at least 2 points to compute any arc length
     if len(arc_points_3d) < 2:
+        return None
+    # Float depth: dropped points are bridged by a straight chord, which
+    # silently shortens the arc -- refuse when too many are missing. (Legacy
+    # maps keep their historical behaviour.)
+    if depth.is_float and (
+        len(sample_xs) - len(arc_points_3d) > MAX_DROPPED_ARC_FRACTION * len(sample_xs)
+    ):
         return None
 
     # Step 4: Sum Euclidean distances between consecutive 3D points.

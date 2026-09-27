@@ -24,11 +24,18 @@ needs::
     depth.valid_mask                       # bool array, native resolution
     depth.photo_to_depth(x, y)             # photo pixel -> native depth pixel
     smooth = depth.median_filtered()       # NaN-aware 3x3 median variant
-    smooth.profile(points)                 # cm along photo points (bilinear)
+    smooth.profile(points, camera=portrait.camera)       # cm along photo points
     smooth.surface_length_mm(points, camera=portrait.camera)
+    depth.integration_map(camera)          # the map profiles/lengths integrate over
     depth.distance_3d_mm(p1, p2, camera=portrait.camera)
     depth.to_cm_array()                    # float cm, NaN = invalid
     depth.to_display_image()               # 8-bit, display only
+
+Integration along paths (``profile``, ``surface_length_mm``, the neck arc):
+legacy maps use the 3x3 median exactly as before; float maps -- unfiltered
+TrueDepth depth with ~1 mm per-pixel jitter -- always go through
+:meth:`DepthMap.integration_map` (3x3 median + edge-preserving 2 mm Gaussian,
+see :data:`INTEGRATION_SIGMA_MM`), whichever variant they are called on.
 
 All coordinates are photo-space pixels of the full-resolution upright photo
 (``portrait.photo.size``); the map knows that size (``photo_size``) and maps
@@ -39,11 +46,15 @@ into its own resolution with the library's endpoint-matching convention
 :attr:`DepthSample.code`) are a *detector scale*, not a measurement: the
 0-255 disparity-code scale (higher = nearer) on which the neck/chin
 detectors' thresholds were tuned. Legacy maps return their stored codes;
-float maps return the same scale computed from the float depth without
-quantisation (``255 * (1/Z - float_min) / (float_max - float_min)`` with the
-display encoding's range, saturating at 1..255 and "invalid" beyond its far
-end, exactly where the 8-bit map has code 0), so those detectors behave as
-before. Metric values never use this scale.
+float maps return ``255 * (1/Z - float_min) / (float_max - float_min)``
+unquantised on the fixed :data:`FLOAT_DETECTOR_CODE_RANGE` (1/3 m .. 1/0.25
+m, saturating at 1..255, "invalid" beyond 3 m) -- independent of the file's
+own depth range and of the display encoding. Metric values never use this
+scale.
+
+Other float sources (e.g. a multi-frame median depth exported by the capture
+app) only need a ``(rows, cols)`` metres array aligned with the photo:
+``FloatDepthMap(depth_m, photo.size)``.
 """
 
 from __future__ import annotations
@@ -55,12 +66,7 @@ from dataclasses import dataclass
 import numpy as np
 from PIL import Image
 
-from .apple_depth import (
-    DISPARITY_FAR_CAP_M,
-    MAX_PLAUSIBLE_DEPTH_M,
-    disparity_encoding_range,
-    encode_depth_as_disparity_8bit,
-)
+from .apple_depth import MAX_PLAUSIBLE_DEPTH_M, encode_depth_as_disparity_8bit
 from .depth_sampling import median_filter_depthmap, sample_filtered_depth
 from .face import sample_depth_at_point, teeth_threshold
 from .incisor import (
@@ -71,7 +77,42 @@ from .incisor import (
     vector_length_3d,
 )
 
-_UNSET = object()
+# Detector scale of float maps: a FIXED reference disparity range, 1/3 m ..
+# 1/0.25 m, i.e. the 8-bit code scale a typical capture-app portrait gets
+# (Z_near ~0.25-0.30 m, far cap 3 m) -- but independent of the file's own
+# near/far ends and of the display encoding's constants, so a float file's
+# neck/chin detector results cannot move when the display encoding changes.
+# Depths nearer than 0.25 m saturate at 255, farther than 3 m are "invalid"
+# for the detectors only. Metric values never use this scale.
+FLOAT_DETECTOR_NEAR_M = 0.25
+FLOAT_DETECTOR_FAR_M = 3.0
+FLOAT_DETECTOR_CODE_RANGE = (1.0 / FLOAT_DETECTOR_FAR_M, 1.0 / FLOAT_DETECTOR_NEAR_M)
+
+# Smoothing of float (unfiltered TrueDepth) depth before anything integrates
+# along it (surface lengths, profiles, the neck arc). Measured on
+# IMG_2346/2347/2348: the residual of depth against a local quadratic on
+# 11x11-pixel cheek/forehead patches is ~0.8-1.1 mm per pixel (Apple-filtered
+# Camera-app depth: 0.2-0.4 mm), and one depth pixel spans ~0.9 mm on a face
+# at 38 cm, so per-sample jitter comparable to the lateral step accumulates
+# as fake relief along a walked path. A NaN-aware Gaussian with a 2 mm
+# (physical) spatial sigma -- edge-preserving: bilateral, see
+# INTEGRATION_RANGE_SIGMA_MM -- applied after the 3x3 median, suppresses that jitter
+# roughly eightfold while leaving centimetre-scale anatomy intact (nose
+# relief along the nasal bridge and across the eyes is unchanged to within
+# 1 mm). The sigma is converted to depth pixels with the camera's focal
+# length at the subject's median depth; without a camera
+# DEFAULT_INTEGRATION_SIGMA_PX is used (~2 mm at 35-40 cm).
+INTEGRATION_SIGMA_MM = 2.0
+# Range sigma of that (bilateral) smoothing: neighbours whose depth differs
+# from the centre by several times this weigh ~nothing, so the silhouette
+# edge is not blended with the background (a plain Gaussian pulled neck-edge
+# depths towards a wall 1 m behind). 5 mm keeps symmetric weights on facial
+# slopes (unbiased on a linear ramp).
+INTEGRATION_RANGE_SIGMA_MM = 5.0
+DEFAULT_INTEGRATION_SIGMA_PX = 2.3
+# Percentile of valid depth taken as the subject's distance for that
+# conversion.
+SUBJECT_DEPTH_PERCENTILE = 10.0
 
 
 @dataclass(frozen=True)
@@ -162,12 +203,27 @@ class DepthMap(ABC):
     def bilinear_code(self, x, y) -> float | None:
         """Bilinearly interpolated detector-scale value (module docstring)."""
 
-    def profile(self, points) -> list[float | None]:
+    def integration_map(self, camera=None) -> DepthMap:
+        """The map every along-path integration samples (see
+        :meth:`profile`, :meth:`surface_length_mm`, the neck arc).
+
+        Legacy maps: ``median_filtered(3)`` -- exactly the historical
+        pipeline. Float maps: 3x3 NaN-aware median plus a NaN-aware Gaussian
+        of :data:`INTEGRATION_SIGMA_MM` (see there), always derived from the
+        original unfiltered map, so ``depth.integration_map()`` and
+        ``depth.median_filtered().integration_map()`` are the same map.
+        """
+        return self.median_filtered(3)
+
+    def profile(self, points, *, camera=None) -> list[float | None]:
         """Camera distances (cm, bilinear) at each photo point, None where invalid.
 
-        Call it on :meth:`median_filtered` for a noise-robust line profile,
-        e.g. with points from
-        :func:`portrait_analyser.depth_sampling.sample_points_along_line`.
+        Samples :meth:`integration_map` for float maps (smoothed for
+        integration; ``camera`` sets the physical smoothing scale). Legacy
+        maps are sampled as they are -- call it on :meth:`median_filtered`
+        for a noise-robust line profile. Points typically come from
+        :func:`portrait_analyser.depth_sampling.sample_points_along_line`;
+        a step of about one depth pixel is enough.
         """
         return [self.bilinear_cm(x, y) for x, y in points]
 
@@ -226,7 +282,9 @@ class DepthMap(ABC):
     def surface_length_mm(self, points, *, camera=None):
         """3-D polyline length (mm) through photo points, depth read bilinearly.
 
-        Call it on :meth:`median_filtered`. None if fewer than two points,
+        Legacy maps: call it on :meth:`median_filtered` (the historical
+        pipeline). Float maps always integrate over :meth:`integration_map`,
+        whichever variant it is called on. None if fewer than two points,
         any point has invalid depth or is outside the working range.
         """
         photo_w, photo_h = self.photo_size
@@ -388,13 +446,15 @@ class FloatDepthMap(DepthMap):
 
     :param depth_m: ``(rows, cols)`` metres, upright (aligned with the photo)
     :param photo_size: ``(width, height)`` of the full-resolution photo
-    :param code_range: ``(float_min, float_max)`` for the detector scale;
-        default: the display encoding's range for this map
+
+    The detector scale (``code_array`` etc.) uses the fixed
+    :data:`FLOAT_DETECTOR_CODE_RANGE`, never the file's own range.
     """
 
     kind = "float"
+    code_range = FLOAT_DETECTOR_CODE_RANGE
 
-    def __init__(self, depth_m, photo_size, *, code_range=None):
+    def __init__(self, depth_m, photo_size):
         super().__init__(photo_size)
         depth = np.array(depth_m, dtype=np.float64)
         if depth.ndim != 2:
@@ -404,41 +464,26 @@ class FloatDepthMap(DepthMap):
         depth[invalid] = np.nan
         depth.setflags(write=False)
         self.depth_m = depth
-        self._code_range = _UNSET if code_range is None else code_range
         self._display = None
+        # The unfiltered map this one was derived from (None = this is it),
+        # and the smoothing applied: None, "median", or ("integration", px).
+        self._source = None
+        self.smoothing = None
+        self._integration_cache = {}
 
     @property
     def shape(self):
         return self.depth_m.shape
 
-    @property
-    def code_range(self):
-        """``(float_min, float_max)`` of the detector scale (the display
-        encoding's range), or None when no pixel lies within it."""
-        if self._code_range is _UNSET:
-            try:
-                self._code_range = disparity_encoding_range(self.depth_m, DISPARITY_FAR_CAP_M)
-            except ValueError:
-                # No valid pixel nearer than the far cap: there is no detector
-                # scale (every code is "invalid"); distances are unaffected.
-                self._code_range = None
-        return self._code_range
-
     def _codes(self, z_m):
         """Detector-scale value(s) for depth(s) in metres: the unquantised
-        8-bit code, saturating at 1..255 exactly like the display encoding;
-        NaN beyond its far end (where the 8-bit map has code 0) or invalid."""
+        8-bit code on :data:`FLOAT_DETECTOR_CODE_RANGE`, saturating at 1..255
+        like an 8-bit encoding; NaN beyond its far end or invalid."""
         z_m = np.atleast_1d(np.asarray(z_m, dtype=np.float64))
-        if self.code_range is None:
-            return np.full(z_m.shape, np.nan)
         float_min, float_max = self.code_range
-        # A flat map (float_min == 0) encodes only depths up to Z_near.
-        far_limit = 1.0 / float_min if float_min > 0 else 1.0 / float_max
+        far_limit = 1.0 / float_min
         with np.errstate(divide="ignore", invalid="ignore"):
-            if float_max == float_min:
-                codes = np.full(z_m.shape, 255.0)
-            else:
-                codes = 255.0 * (1.0 / z_m - float_min) / (float_max - float_min)
+            codes = 255.0 * (1.0 / z_m - float_min) / (float_max - float_min)
             codes = np.clip(codes, 1.0, 255.0)
             codes[~np.isfinite(z_m) | (z_m > far_limit * (1 + 1e-9))] = np.nan
         return codes
@@ -499,6 +544,9 @@ class FloatDepthMap(DepthMap):
         values = self._window_values(depth_x, depth_y, radius, support_mask, support_threshold)
         if not values:
             return None
+        # An even count gives the mean of the two middle values; the legacy
+        # 8-bit sampler picks the upper-middle code instead. Float maps have
+        # no legacy numbers to reproduce, so the textbook median is used.
         z_m = float(np.median(values))
         return DepthSample(distance_cm=z_m * 100.0, raw=None, code=self._code(z_m))
 
@@ -543,7 +591,7 @@ class FloatDepthMap(DepthMap):
         Each output pixel is the median of the valid pixels in its window,
         provided at least half of the window's in-image pixels are valid;
         otherwise NaN (mirroring the 8-bit filter, where a majority of
-        code-0 holes yields 0). Keeps this map's detector scale.
+        code-0 holes yields 0).
         """
         if size < 3 or size % 2 == 0:
             raise ValueError("median filter size must be an odd number >= 3")
@@ -564,9 +612,56 @@ class FloatDepthMap(DepthMap):
         filtered = np.nanmedian(windows, axis=0)
         filtered[~keep | (valid_count == 0)] = np.nan
         filtered_map = FloatDepthMap(filtered, self.photo_size)
-        # Keep the parent's detector scale, like filtering 8-bit codes does.
-        filtered_map._code_range = self.code_range
+        filtered_map._source = self._root()
+        filtered_map.smoothing = "median"
         return filtered_map
+
+    def _root(self):
+        return self if self._source is None else self._source
+
+    def integration_sigma_px(self, camera=None):
+        """Gaussian sigma in depth pixels for :data:`INTEGRATION_SIGMA_MM`.
+
+        ``sigma_mm * f_depth / Z_subject`` with ``f_depth`` the camera's
+        focal length expressed in depth pixels and ``Z_subject`` the
+        :data:`SUBJECT_DEPTH_PERCENTILE` th percentile of valid depth;
+        :data:`DEFAULT_INTEGRATION_SIGMA_PX` without a camera.
+        """
+        if camera is None:
+            return DEFAULT_INTEGRATION_SIGMA_PX
+        depth = self._root().depth_m
+        valid = depth[np.isfinite(depth)]
+        if valid.size == 0:
+            return DEFAULT_INTEGRATION_SIGMA_PX
+        # The subject is the nearest large surface: the 10th percentile of
+        # valid depth (a median would drift to a near wall behind the head).
+        z_ref_mm = float(np.percentile(valid, SUBJECT_DEPTH_PERCENTILE)) * 1000.0
+        cols = self.shape[1]
+        focal_depth_px = camera.fx * cols / self.photo_size[0]
+        return INTEGRATION_SIGMA_MM * focal_depth_px / z_ref_mm
+
+    def integration_map(self, camera=None):
+        if isinstance(self.smoothing, tuple):
+            return self
+        root = self._root()
+        sigma_px = round(root.integration_sigma_px(camera), 3)
+        cached = root._integration_cache.get(sigma_px)
+        if cached is None:
+            median = root.median_filtered(3)
+            cached = FloatDepthMap(_nan_bilateral(median.depth_m, sigma_px), root.photo_size)
+            cached._source = root
+            cached.smoothing = ("integration", sigma_px)
+            root._integration_cache[sigma_px] = cached
+        return cached
+
+    def profile(self, points, *, camera=None):
+        smooth = self.integration_map(camera)
+        return [smooth.bilinear_cm(x, y) for x, y in points]
+
+    def surface_length_mm(self, points, *, camera=None):
+        smooth = self.integration_map(camera)
+        photo_w, photo_h = self.photo_size
+        return surface_length_mm(smooth, points, photo_w, photo_h, camera=camera)
 
     @property
     def valid_mask(self):
@@ -576,7 +671,7 @@ class FloatDepthMap(DepthMap):
         return self.depth_m * 100.0
 
     def code_array(self):
-        codes = self._codes(self.depth_m)
+        codes = self._codes(self.depth_m.ravel()).reshape(self.shape)
         return np.where(np.isnan(codes), 0.0, codes).astype(np.float32)
 
     def display_encoding(self):
@@ -587,3 +682,39 @@ class FloatDepthMap(DepthMap):
 
     def to_display_image(self):
         return self.display_encoding()[0]
+
+
+def _nan_bilateral(depth, sigma_px, sigma_range_m=None):
+    """NaN-aware bilateral smoothing of a metres map.
+
+    Spatial Gaussian of ``sigma_px`` (truncated at 2 sigma) times a range
+    Gaussian of ``sigma_range_m`` on the depth difference to the centre
+    pixel, so a face pixel next to the silhouette is never averaged with the
+    background behind it. Invalid pixels stay NaN and contribute nothing.
+    """
+    if sigma_range_m is None:
+        sigma_range_m = INTEGRATION_RANGE_SIGMA_MM / 1000.0
+    valid = np.isfinite(depth)
+    if sigma_px <= 0:
+        return depth.copy()
+    radius = max(1, math.ceil(2.0 * sigma_px))
+    rows, cols = depth.shape
+    padded = np.pad(np.where(valid, depth, np.nan), radius, constant_values=np.nan)
+    centre = np.where(valid, depth, 0.0)
+    total = np.zeros(depth.shape)
+    weights = np.zeros(depth.shape)
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            spatial = math.exp(-(dx * dx + dy * dy) / (2.0 * sigma_px * sigma_px))
+            if spatial < math.exp(-2.0):
+                continue  # outside the 2-sigma disc
+            shifted = padded[radius + dy : radius + dy + rows, radius + dx : radius + dx + cols]
+            ok = np.isfinite(shifted)
+            diff = np.where(ok, shifted - centre, 0.0)
+            weight = np.where(ok, spatial * np.exp(-(diff * diff) / (2 * sigma_range_m**2)), 0.0)
+            total += weight * np.where(ok, shifted, 0.0)
+            weights += weight
+    with np.errstate(divide="ignore", invalid="ignore"):
+        smoothed = total / weights
+    smoothed[~valid | (weights <= 0)] = np.nan
+    return smoothed
