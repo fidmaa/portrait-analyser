@@ -29,10 +29,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `sagitta_mm`, `front_arc_mm`, `off_plane_rms_mm`, `circle_radius_mm`,
   `ellipse_b_mm`, `circumferences_mm` for `fitted_circle` (headline),
   `circle` (pi W), `arc_circle`, `sagitta_ellipse`, `fitted_ellipse`,
-  `circumference_prior_ellipse_mm`, the per-model `sensitivity` to the side
-  points (+-3 % pixel width), `profile_mm`/`path_3d_mm`, `quality`,
-  `quality_reasons`, `warnings`. `compute_neck_sag()` is public;
-  `lower_jaw_contour()`/`LowerJaw` in `neck_width`.
+  `circumference_prior_ellipse_mm`, `circle_rms_mm`, `circle_span_deg`,
+  `sensitivity_detail` (signed change of every model for the side columns
+  +-3 % pixel width, the front point +-5 mm and 10 % of the samples dropped
+  at each end; None where not computable) and `sensitivity` (the largest
+  `|change|` per model), `profile_mm`/`path_3d_mm`, `quality`,
+  `quality_reasons` (the tape's own), `warnings`. The fitted circle is the
+  algebraic fit refined by Gauss-Newton to the geometric one. Quality gate:
+  low when the fitted circle and pi W disagree by more than 10 %, R/(W/2)
+  is outside 0.8-1.4, the samples span < 100 degrees or lie > 2 mm RMS off
+  the circle, a perturbation moves it > 10 %, the front point was
+  inferred / clamped to the band bottom / the beard's lower border was not
+  found / two chin falls were seen, the front point is not below the side
+  points, > 10 % of the path has no depth, or the headline fell back to pi
+  W. `compute_neck_sag()` is public; `lower_jaw_contour()`/`LowerJaw` in
+  `neck_width`.
+  **Accuracy caveat:** the fitted circle measures the curvature of the
+  visible arc; on synthetic necks it is -17..+22 % off the true section
+  depending on the section's shape (within ~3 % only for near-circular
+  sections; flat fronts read high and are flagged, deep sections read low
+  and are not). Validation: IMG_2389 41.8 cm, IMG_2363 41.7 cm, IMG_2386
+  (assumed intrinsics) 40.8 cm; collar size 41 cm.
+- `NeckWidthResult.circumference_mm` / `circumference_model` (the headline)
+  with `circumference_quality` / `circumference_quality_reasons` (the
+  width's reasons + the tape's). `quality` still governs `width_mm` (and
+  `circumference_circle_mm` / `circumference_ellipse_mm`);
+  `circumference_quality` governs `circumference_mm`. An exception in the
+  tape computation is logged; the width result stands.
 
 ### Changed
 
@@ -48,6 +71,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   2669 (128.9 mm) up to the beard/neck boundary (y 2550, 124.0 mm);
   IMG_2389 keeps its run (row 2215 instead of 2238, 134.5 mm); the other
   validation photos keep their status. Legacy files unchanged.
+- GUI-visible: `row_y`/`left_x`/`right_x` move up to the neck just under
+  the jaw (IMG_2363: width 128.9 -> 124.0 mm, `circumference_circle_mm`
+  40.5 -> 39.0 cm, ellipse range 37.5-38.5 -> 36.1-37.0 cm).
+  `height_below_chin_mm` is **signed**: negative when the side row lies
+  above the chin landmark. `band` stays `(chin_y, bottom_y)`; the search
+  starts at the new `search_top_y`, which may be above the chin.
 
 ## [0.9.0] - 2026-09-28
 

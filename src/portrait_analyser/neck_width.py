@@ -143,7 +143,7 @@ Repeatability: on the same person, IMG_2389 gives 134.5 mm and IMG_2363
 0.9.0 search picked) -- the width depends on the height it is taken at,
 8 % between these photos, i.e. roughly +-1.6 cm of pi * W. The ~1 % above
 is only the row-to-row stability within one photo. The tape-plane
-circumference (:mod:`~portrait_analyser.neck_sag`) gives 41.4 cm on both. Validation:
+circumference (:mod:`~portrait_analyser.neck_sag`) gives 41.8 / 41.7 cm. Validation:
 IMG_2389 134.5 mm (Vision band); IMG_2386 carries no intrinsics
 (``"no-camera"`` by default; 133.4 mm with the prototype's assumed fx 2765
 passed as ``camera=``).
@@ -283,6 +283,11 @@ CHIN_CLEARANCE_MM = 6.5
 # JAW_ANGLE_OUTSIDE_MM (else it is the cheek / face outline). Other rows
 # above the chin are face rows and are skipped (not neck rows, so not
 # counted as rejections).
+# These three (and CHIN_CLEARANCE_MM) are converted to px at the *chin*
+# depth: the jaw landmarks and the chin lie at about the same distance
+# (IMG_2389/2363: chin 35.8-36.2 cm, jaw angles 40-42 cm, neck edges 44-46
+# cm), so the margins in px are ~10-25 % larger than at the neck -- a
+# deliberately conservative reading, not a mistake.
 JAW_ANGLE_CLEARANCE_MM = 3.0
 JAW_CONTOUR_MARGIN_MM = 3.0
 JAW_ANGLE_OUTSIDE_MM = 5.0
@@ -490,10 +495,14 @@ class NeckWidthResult:
     :ivar rows_used: y of the clean rows the median was taken over
     :ivar support_mm: vertical extent of ``rows_used``, mm at neck depth
     :ivar height_below_chin_mm: ``row_y`` below the chin landmark, mm in the
-        image plane at the neck-edge depth
+        image plane at the neck-edge depth. **Signed**: negative when the
+        side row lies above the chin landmark (neck sides under the jaw
+        angles on a raised or clean-shaven chin; see "Which rows")
     :ivar roll_deg: head roll (nose -> chin from vertical, degrees, signed)
     :ivar neck_roll_deg: neck-axis roll from the used rows' edge slopes
-    :ivar band: ``(top_y, bottom_y)`` searched, photo px (top = chin)
+    :ivar band: ``(chin_y, bottom_y)``, photo px: the chin landmark row and
+        the band bottom. Rows are searched from ``search_top_y`` (which may
+        be above the chin) down to ``bottom_y``
     :ivar band_source: ``"vision-neck"`` (bottom = Vision neck joint),
         ``"chin-offset"`` (bottom = chin + :data:`CHIN_OFFSET_BAND_MM`) or
         ``"manual"`` (:func:`neck_width_from_edges`)
@@ -516,7 +525,15 @@ class NeckWidthResult:
         path with its front sag and the tilted-plane circumference models
         (automatic ``"ok"`` results only; None otherwise)
     :ivar circumference_mm: the headline circumference (``sag.headline_mm``,
-        model ``circumference_model``), or None
+        model ``circumference_model``), or None. Indicative: on synthetic
+        necks the fitted-circle headline is -17..+22 % off the true section
+        depending on its shape (neck_sag, "Bias of the fitted circle")
+    :ivar circumference_quality: ``"good"``/``"low"`` of ``circumference_mm``
+        (None without it), with ``circumference_quality_reasons`` = the
+        width's ``quality_reasons`` + the tape's ``sag.quality_reasons``.
+        ``quality`` governs ``width_mm`` (and ``circumference_circle_mm`` /
+        ``circumference_ellipse_mm``, which derive from it only);
+        ``circumference_quality`` governs ``circumference_mm``.
     """
 
     status: str
@@ -547,6 +564,8 @@ class NeckWidthResult:
     sag: NeckSagResult | None = None
     circumference_mm: float | None = None
     circumference_model: str | None = None
+    circumference_quality: str | None = None
+    circumference_quality_reasons: list[str] = field(default_factory=list)
 
 
 def circumference_circle(width_mm: float) -> float:
@@ -1271,7 +1290,8 @@ def measure_neck_width(
 def _attach_sag(portrait, result: NeckWidthResult, landmarks, camera, depth, skin):
     """Tape path and tilted-plane circumference (:mod:`~portrait_analyser.neck_sag`)
     for an ``"ok"`` width; sets ``sag`` and the ``circumference_mm`` headline.
-    A failure is logged and reported in ``sag``/``warnings``; the width stands."""
+    Any failure is logged (with traceback) and reported in
+    ``sag``/``warnings``: the width stands on its own."""
     from .neck_sag import (
         SAG_STATUS_FAILED,
         SAG_STATUS_OK,
@@ -1283,7 +1303,7 @@ def _attach_sag(portrait, result: NeckWidthResult, landmarks, camera, depth, ski
         result.sag = compute_neck_sag(
             portrait, result, landmarks, camera=camera, depth=depth, skin=skin
         )
-    except (ValueError, ArithmeticError, np.linalg.LinAlgError) as exc:
+    except Exception as exc:  # logged with traceback; the width result stands
         logger.exception("neck sag / tape-plane computation failed")
         result.sag = NeckSagResult(
             status=SAG_STATUS_FAILED, message=f"{type(exc).__name__}: {exc}"
@@ -1291,6 +1311,9 @@ def _attach_sag(portrait, result: NeckWidthResult, landmarks, camera, depth, ski
     if result.sag.status == SAG_STATUS_OK:
         result.circumference_mm = result.sag.headline_mm
         result.circumference_model = result.sag.headline_model
+        reasons = [*result.quality_reasons, *result.sag.quality_reasons]
+        result.circumference_quality_reasons = reasons
+        result.circumference_quality = QUALITY_LOW if reasons else QUALITY_GOOD
     else:
         result.warnings.append(f"no tape-plane circumference: {result.sag.message}")
 

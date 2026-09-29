@@ -49,8 +49,10 @@ can work. This module:
 
 Circumference models (all reported, see :class:`NeckSagResult`):
 
-* ``fitted_circle``: least-squares circle through the in-plane samples and
-  the front point, ``2 pi R``. **Headline** (:data:`HEADLINE_MODEL`).
+* ``fitted_circle``: least-squares circle (algebraic start + Gauss-Newton
+  refinement to the geometric fit) through the in-plane path samples (the
+  front point is one of them), ``2 pi R``. **Headline**
+  (:data:`HEADLINE_MODEL`).
 * ``circle``: ``pi W`` (``W`` = 3-D distance of the side points).
 * ``arc_circle``: the circle with chord ``W`` and arc = the 3-D path length
   (the GUI's arc-circle), ``2 pi R``.
@@ -64,26 +66,54 @@ Circumference models (all reported, see :class:`NeckSagResult`):
 
 Why the fitted circle
 ---------------------
-Each model's sensitivity to the side-point placement is measured on every
-result (``sensitivity``: the side columns moved so the pixel width changes
-by +-:data:`SENSITIVITY_WIDTH_FRACTION`). The fitted circle only uses the
-front-arc samples, which barely move with the side columns: 1.0-2.5 % on
-IMG_2389/2363 and 1.1-2.0 % on the synthetic necks, against 4-5 % for pi W,
-5-7 % for the arc circle and 7-10 % for the two ``a = W / 2`` ellipses. It
-is also the only model consistent between the two photos of one person
-(41.4 / 41.4 cm, collar size 41 cm; pi W 42.2 / 39.0, arc circle 42.5 /
+Each model's sensitivity is measured on every result
+(``sensitivity_detail[perturbation][model]`` = signed relative change,
+``sensitivity[model]`` = the largest ``|change|``, None where the perturbed
+model could not be computed). Perturbations: the side columns moved so the
+pixel width changes by +-:data:`SENSITIVITY_WIDTH_FRACTION`; the front
+point moved +-:data:`SENSITIVITY_FRONT_MM` along the midline; and
+:data:`SENSITIVITY_END_DROP` of the samples dropped at each end of the arc.
+To the side columns the fitted circle is the least sensitive model (only
+the front-arc samples enter it): 0.8-2.5 % on IMG_2389/2363 and ~2 % on the
+synthetic necks, against 4-5 % for pi W, 5-7 % for the arc circle and
+7-10 % for the two ``a = W / 2`` ellipses. It is **not** insensitive to the
+arc itself: its curvature comes mostly from the outer ~20 % of the arc
+(where it turns towards the sides), so dropping 10 % of the samples at
+each end moves it by -7.4 % (IMG_2389) / +4.8 % (IMG_2363), and moving the
+front point by 5 mm by -6.3 / +4.2 % (IMG_2363; -1.4 % on IMG_2389). It is
+also the only model consistent between the two photos of one person
+(41.8 / 41.7 cm, collar size 41 cm; pi W 42.2 / 39.0, arc circle 42.5 /
 42.0). The ``a = W / 2`` ellipses read 20-25 % low everywhere: the side
 points are not the lateral extremes of the section in depth (see Plane).
 A free ellipse fit (centre and both axes) is ill-conditioned on the ~140
 degrees of arc visible: +40-60 % on noise-free synthetic data.
 
-Bias of the fitted circle: it measures the curvature of the visible arc.
-On synthetic tilted elliptic necks (lateral 64 mm, front-back 56-64 mm,
-axis leaning 10-25 degrees) it is within -5..+9 % of the true perimeter of
-the plane section, within 3 % where that section is near-circular
-(front-back 58-60 mm at 15 degrees); a section flatter at the front than at
-the sides reads high (front-back 48 mm: +22 %), a section elongated front
-to back reads low. The tilt of a real tape (front lower than the sides)
+Bias of the fitted circle: it measures the curvature of the visible arc,
+so its error depends on the (unseen) shape of the section. On synthetic
+tilted elliptic necks (lateral 64 mm, axis leaning 15 degrees) against the
+true perimeter of the plane section: front-back 48 / 56 / 60 / 64 / 72 mm
+-> +22 / +4.5 / 0.0 / -4.7 / -16.5 % (pi W: +6 / -1 / -4 / -6 / -13 %);
+leaning 10 / 20 / 25 degrees at 60 mm: -4 / +4 / +9 %. Within ~3 % only
+where the section is near-circular; a section flatter at the front than at
+the sides reads high, one elongated front to back reads low.
+
+Quality gate
+------------
+``quality`` is ``"low"`` (with ``quality_reasons``) when the front point
+was inferred, clamped to the band bottom, or its search saw a beard without
+a lower border or two chin falls; when the front point is not below / in
+front of the side points; when more than :data:`MAX_INVALID_SAMPLE_FRACTION`
+of the path has no depth; when the headline falls back to pi W; and for the
+fitted circle when (a) it and pi W disagree by more than
+:data:`MAX_CIRCLE_VS_WIDTH` (flags the flat-front case: +15 % at
+front-back 48 mm; IMG_2389 -1 %, IMG_2363 +7 %), (b) ``R / (W/2)`` is
+outside :data:`CIRCLE_RADIUS_RATIO_RANGE` (validation 0.96-1.15; a
+radius beyond :data:`MAX_FIT_RADIUS_FACTOR` x W/2 is no circle at all),
+(c) the samples span less than :data:`MIN_CIRCLE_SPAN_DEG` of it
+(validation 106-138 degrees) or lie more than :data:`MAX_CIRCLE_RMS_MM`
+RMS off it (validation 0.2-1.2 mm), or (d) a perturbation moves it by more
+than :data:`MAX_HEADLINE_SENSITIVITY`. A deep section (front-back 72 mm,
+-16.5 %) passes the gate: nothing visible distinguishes it. The tilt of a real tape (front lower than the sides)
 lengthens the section front to back, which tends to make it rounder. The
 thresholds and the front-point rules are provisional, tuned on two photos
 of one person (user annotations of the tape and the side points).
@@ -127,8 +157,13 @@ HAIR_MATTE_ON = 128
 # The beard's lower border: first row from which the midline is skin (and
 # not hair) for this long ...
 BEARD_BORDER_RUN_MM = 3.0
-# ... and the tape passes this far below it (the beard hangs over the skin
-# border; the user's tape on IMG_2389 runs ~9 mm below the matte border).
+# ... and the tape passes this far below it (the beard hairs hang a few mm
+# over the skin border). The user's tape on IMG_2389 runs ~9 mm below the
+# matte border, but there the chin-end rule already puts the front point
+# there (2466 vs the user's 2464, the border + 5 mm is 2439); on IMG_2363
+# the border + 5 mm (2741) is the lower one, and a larger clearance would
+# push it further down the throat than the chin end (2718) supports. 5 mm is
+# the smallest clearance that keeps the tape off the beard hairs.
 BEARD_CLEARANCE_MM = 5.0
 # Depth slope along the midline, mm of depth per mm down (image plane at the
 # depth read). The chin falls away at 2.5-6.5 on the validation photos; a
@@ -160,6 +195,23 @@ MIN_FIT_SAMPLES = 8
 # changes by +- this fraction (each side half of it).
 SENSITIVITY_WIDTH_FRACTION = 0.03
 
+# Front-point and end-sample perturbations of the sensitivity check.
+SENSITIVITY_FRONT_MM = 5.0
+SENSITIVITY_END_DROP = 0.10
+
+# Circle fit: Gauss-Newton refinement steps after the algebraic start, and
+# the largest radius accepted (x the half width; beyond it the samples are
+# nearly collinear and the "circle" is a line).
+CIRCLE_GN_ITERATIONS = 10
+MAX_FIT_RADIUS_FACTOR = 3.0
+
+# Quality gate of the headline (module docstring, "Quality gate").
+MAX_CIRCLE_VS_WIDTH = 0.10
+CIRCLE_RADIUS_RATIO_RANGE = (0.8, 1.4)
+MIN_CIRCLE_SPAN_DEG = 100.0
+MAX_CIRCLE_RMS_MM = 2.0
+MAX_HEADLINE_SENSITIVITY = 0.10
+
 # Headline model: the least sensitive to the side-point placement (module
 # docstring, "Why the fitted circle").
 HEADLINE_MODEL = MODEL_FITTED_CIRCLE
@@ -172,8 +224,10 @@ class NeckSagResult:
     Photo px for points; mm for lengths; degrees for angles.
 
     :ivar status: ``"ok"`` or ``"failed"`` (``message`` says why)
-    :ivar quality: ``"good"``/``"low"`` with ``quality_reasons`` (includes
-        the width's own reasons)
+    :ivar quality: ``"good"``/``"low"`` with ``quality_reasons``: the tape's
+        own (module docstring, "Quality gate"); the width's reasons are not
+        repeated here -- ``NeckWidthResult.circumference_quality`` combines
+        both
     :ivar left_xy/right_xy: side points (the width's edges)
     :ivar front_xy: front point of the tape (midline)
     :ivar front_source: ``"beard-border"``, ``"chin-end"`` or ``"inferred"``
@@ -195,13 +249,19 @@ class NeckSagResult:
     :ivar front_arc_mm: 3-D length of the path (side point to side point)
     :ivar off_plane_rms_mm: RMS distance of the path samples from the plane
     :ivar circle_radius_mm: fitted circle radius (in-plane)
+    :ivar circle_rms_mm: geometric RMS of the samples off the fitted circle
+    :ivar circle_span_deg: angle the samples subtend at its centre
     :ivar ellipse_b_mm: fitted-ellipse semi-axis towards the front
     :ivar circumferences_mm: ``{model: mm}`` for every model computed
     :ivar circumference_prior_ellipse_mm: ``(low, high)`` b/a-prior range
     :ivar headline_mm/headline_model: the reported circumference
-    :ivar sensitivity: ``{model: max |relative change|}`` for the side
-        points moved to +-:data:`SENSITIVITY_WIDTH_FRACTION` pixel width
+    :ivar sensitivity: ``{model: max |relative change|}`` over the
+        perturbations of ``sensitivity_detail`` (None = no perturbed value)
+    :ivar sensitivity_detail: ``{perturbation: {model: signed relative
+        change or None}}`` for the side columns (+-3 % pixel width), the
+        front point (+-5 mm) and 10 % of the samples dropped at each end
     :ivar profile_mm: in-plane ``(u, v)`` of the samples used for the fits
+        (the front point is among them)
     :ivar path_3d_mm: camera-space points of the path (side points
         included), for plots
     """
@@ -234,7 +294,10 @@ class NeckSagResult:
     circumference_prior_ellipse_mm: tuple[float, float] | None = None
     headline_mm: float | None = None
     headline_model: str | None = None
-    sensitivity: dict[str, float] = field(default_factory=dict)
+    circle_rms_mm: float | None = None
+    circle_span_deg: float | None = None
+    sensitivity: dict[str, float | None] = field(default_factory=dict)
+    sensitivity_detail: dict[str, dict[str, float | None]] = field(default_factory=dict)
     profile_mm: list[tuple[float, float]] = field(default_factory=list)
     path_3d_mm: list[tuple[float, float, float]] = field(default_factory=list)
 
@@ -248,9 +311,16 @@ def _back_project(camera, x, y, z_mm) -> np.ndarray:
     )
 
 
-def fit_circle_2d(points) -> tuple[float, float, float] | None:
-    """Least-squares (algebraic, Kasa) circle ``(cx, cy, r)`` through 2-D
-    points, or None (fewer than 3 points / degenerate)."""
+def fit_circle_2d(points, max_radius=None) -> tuple[float, float, float] | None:
+    """Least-squares circle ``(cx, cy, r)`` through 2-D points, or None
+    (fewer than 3 points, degenerate/collinear, or ``r > max_radius``).
+
+    The algebraic (Kasa) fit is the start; :data:`CIRCLE_GN_ITERATIONS`
+    Gauss-Newton steps then minimise the geometric distances
+    ``sum (|p - c| - r)^2``. On a partial arc Kasa is biased towards a
+    smaller circle (IMG_2389/2363 and the synthetic necks: the geometric
+    fit is 0.3-1 % larger); the refinement removes that bias and does not
+    change the fit on exact circles."""
     pts = np.asarray(points, dtype=float)
     if len(pts) < 3:
         return None
@@ -262,7 +332,33 @@ def fit_circle_2d(points) -> tuple[float, float, float] | None:
     r2 = sol[2] + cu * cu + cv * cv
     if not np.isfinite(r2) or r2 <= 0:
         return None
-    return float(cu), float(cv), float(math.sqrt(r2))
+    r = math.sqrt(r2)
+    for _ in range(CIRCLE_GN_ITERATIONS):
+        du, dv = u - cu, v - cv
+        dist = np.hypot(du, dv)
+        if np.any(dist < 1e-9):
+            break
+        jac = np.column_stack([-du / dist, -dv / dist, -np.ones_like(u)])
+        step, *_ = np.linalg.lstsq(jac, -(dist - r), rcond=None)
+        if not np.all(np.isfinite(step)):
+            break
+        cu, cv, r = cu + step[0], cv + step[1], r + step[2]
+    if not (np.isfinite(r) and r > 0):
+        return None
+    if max_radius is not None and r > max_radius:
+        return None
+    return float(cu), float(cv), float(r)
+
+
+def circle_fit_stats(points, circle) -> tuple[float, float]:
+    """``(rms_mm, span_deg)``: geometric RMS residual of ``points`` from
+    ``circle`` and the angle the points subtend at its centre."""
+    pts = np.asarray(points, dtype=float)
+    cu, cv, r = circle
+    du, dv = pts[:, 0] - cu, pts[:, 1] - cv
+    rms = float(np.sqrt(np.mean((np.hypot(du, dv) - r) ** 2)))
+    ang = np.unwrap(np.arctan2(dv, du)[np.argsort(pts[:, 0])])
+    return rms, float(math.degrees(ang.max() - ang.min()))
 
 
 def fit_ellipse_b(points, a: float) -> float | None:
@@ -308,6 +404,7 @@ class _FrontSearch:
     source: str
     beard_border_y: float | None
     chin_end_y: float | None
+    flags: list[str] = field(default_factory=list)
 
 
 def _column_mean(matte, x, y, half):
@@ -335,6 +432,7 @@ def find_front_point(
             on = False
         return on
 
+    flags: list[str] = []
     on = np.array([skin_on(y) for y in ys], dtype=bool)
     beard_border = None
     probe = max(1, round(BEARD_PROBE_MM / MIDLINE_STEP_MM))
@@ -344,6 +442,11 @@ def find_front_point(
             if on[i : i + run].all():
                 beard_border = float(ys[i])
                 break
+        if beard_border is None:
+            flags.append(
+                f"beard detected (no skin under the chin) but its lower border not "
+                f"found within {(end - chin_y) / px_mm:.0f} mm"
+            )
 
     chin_end = None
     z = np.array(
@@ -362,6 +465,12 @@ def find_front_point(
                 after = np.flatnonzero(slope[peak:] < CHIN_END_SLOPE)
                 if after.size:
                     chin_end = float(mid_ys[peak + after[0]])
+                falls = _count_falls(slope)
+                if falls > 1:
+                    flags.append(
+                        f"{falls} depth falls below the chin (double chin / skin fold?); "
+                        "the front point follows the steepest"
+                    )
 
     candidates = []
     if beard_border is not None:
@@ -374,7 +483,32 @@ def find_front_point(
         y, source = max(candidates)
     else:
         y, source = chin_y + FRONT_FALLBACK_MM * px_mm, FRONT_SOURCE_INFERRED
-    return _FrontSearch(float(min(y, bottom_y)), source, beard_border, chin_end)
+    if y > bottom_y:
+        flags.append(
+            f"front point clamped to the band bottom ({(y - bottom_y) / px_mm:.0f} mm "
+            "higher than found)"
+        )
+        y = bottom_y
+    return _FrontSearch(float(y), source, beard_border, chin_end, flags)
+
+
+def _count_falls(slope) -> int:
+    """Separate runs of the midline slope at or above
+    :data:`CHIN_FALL_MIN_SLOPE`, split by a stretch below
+    :data:`CHIN_END_SLOPE` (a chin, then a second fold)."""
+    falls, inside, settled = 0, False, True
+    for value in slope:
+        if not np.isfinite(value):
+            continue
+        if value >= CHIN_FALL_MIN_SLOPE:
+            if not inside and settled:
+                falls += 1
+            inside, settled = True, False
+        else:
+            inside = False
+            if value < CHIN_END_SLOPE:
+                settled = True
+    return falls
 
 
 # -- tape path ----------------------------------------------------------------------
@@ -402,6 +536,10 @@ def tape_path(left_xy, right_xy, front_xy, jaw, step_px) -> list[tuple[float, fl
     like the lower jaw contour (module docstring, step 2). Includes the
     three points; left -> right."""
     (xl, yl), (xr, yr), (xf, yf) = left_xy, right_xy, front_xy
+    if not xl < xf < xr:
+        raise ValueError(
+            f"front point x {xf:.0f} not between the side points ({xl:.0f}, {xr:.0f})"
+        )
     n = max(3, math.ceil((xr - xl) / step_px) + 1)
     xs = np.union1d(np.linspace(xl, xr, n), [xf])
     u = (xs - xl) / (xr - xl)
@@ -453,6 +591,8 @@ class _Models:
     origin: tuple
     off_plane: float | None
     circle: tuple[float, float, float] | None
+    circle_rms: float | None
+    circle_span: float | None
     ellipse_b: float | None
     circumferences: dict
     profile: list
@@ -466,7 +606,12 @@ def _plane_normal_3pt(p_left, p_right, p_front):
     return None if norm < 1e-9 else normal / norm
 
 
-def _models(depth, smooth, camera, left_xy, right_xy, front_xy, jaw, z_ref_cm):
+def _models(
+    depth, smooth, camera, left_xy, right_xy, front_xy, jaw, z_ref_cm, *, end_drop=0.0
+):
+    """All geometry and models for one placement of the three key points.
+    ``end_drop``: fraction of the path samples dropped at *each* end before
+    the plane and the fits (sensitivity check; the arc keeps them)."""
     sides = _side_points(depth, camera, left_xy, right_xy, z_ref_cm)
     z_front = smooth.bilinear_cm(*front_xy)
     if sides is None or z_front is None:
@@ -487,33 +632,46 @@ def _models(depth, smooth, camera, left_xy, right_xy, front_xy, jaw, z_ref_cm):
     inner = [
         (x, y) for x, y in path if left_xy[0] + inset_px <= x <= right_xy[0] - inset_px
     ]
-    samples, invalid = [], 0
+    samples, invalid, front_sampled = [], 0, False
     for x, y in inner:
         z = smooth.bilinear_cm(x, y)
         if z is None:
             invalid += 1
             continue
         samples.append(_back_project(camera, x, y, z * 10.0))
+        front_sampled |= x == front_xy[0] and y == front_xy[1]
     invalid_fraction = invalid / len(inner) if inner else 1.0
     path_3d = [p_left, *samples, p_right]
     arc = None
     if invalid == 0 and samples:
         arc = float(sum(np.linalg.norm(b - a) for a, b in itertools.pairwise(path_3d)))
 
-    # The plane the profile is expressed in: least squares through the path
-    # samples and the front point (see PLANE_FROM_SAMPLES); the 3-point plane
-    # when there are too few samples.
+    # The fit cloud: the path samples, which include the front point itself
+    # (tape_path puts a vertex there); added separately only if its sample
+    # had no depth, so it is never counted twice.
+    cloud = list(samples)
+    if end_drop > 0 and cloud:
+        k = round(end_drop * len(cloud))
+        cloud = cloud[k : len(cloud) - k] if len(cloud) > 2 * k else []
+    if (not front_sampled or end_drop > 0) and not any(
+        np.allclose(p, p_front) for p in cloud
+    ):
+        cloud.append(p_front)
+
+    # The plane the profile is expressed in: least squares through the fit
+    # cloud (module docstring, step 3 "Plane"); the 3-point plane when there
+    # are too few samples.
     normal = normal3
-    if len(samples) >= MIN_FIT_SAMPLES:
-        cloud = np.array([*samples, p_front])
-        centroid = cloud.mean(axis=0)
-        normal = np.linalg.svd(cloud - centroid)[2][2]
+    fitted_plane = len(cloud) >= MIN_FIT_SAMPLES
+    if fitted_plane:
+        centroid = np.mean(cloud, axis=0)
+        normal = np.linalg.svd(np.array(cloud) - centroid)[2][2]
     if normal[1] < 0:
         normal = -normal
     # In-plane frame: e1 along the side chord (projected), e2 towards the
     # front point; origin at the (projected) chord midpoint.
     mid = 0.5 * (p_left + p_right)
-    if len(samples) >= MIN_FIT_SAMPLES:
+    if fitted_plane:
         mid = mid - np.dot(mid - centroid, normal) * normal
     chord = (p_right - p_left) - np.dot(p_right - p_left, normal) * normal
     e1 = chord / np.linalg.norm(chord)
@@ -524,10 +682,7 @@ def _models(depth, smooth, camera, left_xy, right_xy, front_xy, jaw, z_ref_cm):
     tilt = math.degrees(math.acos(min(1.0, abs(float(normal[1])))))
     tilt3 = math.degrees(math.acos(min(1.0, abs(float(normal3[1])))))
     drop = math.degrees(math.atan2(float(e2[1]), -float(e2[2])))
-    profile = [
-        (float(np.dot(p - mid, e1)), float(np.dot(p - mid, e2)))
-        for p in [*samples, p_front]
-    ]
+    profile = [(float(np.dot(p - mid, e1)), float(np.dot(p - mid, e2))) for p in cloud]
     off_plane = (
         float(np.sqrt(np.mean([np.dot(p - mid, normal) ** 2 for p in samples])))
         if samples
@@ -538,11 +693,12 @@ def _models(depth, smooth, camera, left_xy, right_xy, front_xy, jaw, z_ref_cm):
         MODEL_CIRCLE: math.pi * width,
         MODEL_SAGITTA_ELLIPSE: ellipse_circumference(width / 2.0, max(sagitta, 1e-6)),
     }
-    circle = ellipse_b = None
-    if len(samples) >= MIN_FIT_SAMPLES:
-        circle = fit_circle_2d(profile)
+    circle = ellipse_b = rms = span = None
+    if len(cloud) >= MIN_FIT_SAMPLES:
+        circle = fit_circle_2d(profile, max_radius=MAX_FIT_RADIUS_FACTOR * width / 2.0)
         if circle is not None:
             circ[MODEL_FITTED_CIRCLE] = 2.0 * math.pi * circle[2]
+            rms, span = circle_fit_stats(profile, circle)
         ellipse_b = fit_ellipse_b(profile, width / 2.0)
         if ellipse_b is not None:
             circ[MODEL_FITTED_ELLIPSE] = ellipse_circumference(width / 2.0, ellipse_b)
@@ -561,6 +717,8 @@ def _models(depth, smooth, camera, left_xy, right_xy, front_xy, jaw, z_ref_cm):
         tuple(float(v) for v in mid),
         off_plane,
         circle,
+        rms,
+        span,
         ellipse_b,
         circ,
         profile,
@@ -572,24 +730,49 @@ def _models(depth, smooth, camera, left_xy, right_xy, front_xy, jaw, z_ref_cm):
 def _sensitivity(
     depth, smooth, camera, left_xy, right_xy, front_xy, jaw, z_ref_cm, base
 ):
+    """``(worst, detail)``: ``detail[perturbation][model]`` = signed relative
+    change (None when the perturbed model could not be computed), ``worst
+    [model]`` = the largest ``|change|`` over the perturbations (None when
+    none could be computed). Perturbations: the side columns moved to make
+    the pixel width +-:data:`SENSITIVITY_WIDTH_FRACTION`, the front point
+    moved +-:data:`SENSITIVITY_FRONT_MM` along the midline, and
+    :data:`SENSITIVITY_END_DROP` of the samples dropped at each end."""
     delta = 0.5 * SENSITIVITY_WIDTH_FRACTION * (right_xy[0] - left_xy[0])
-    worst: dict[str, float] = {}
-    for sign in (1.0, -1.0):
-        moved = _models(
-            depth,
-            smooth,
-            camera,
-            (left_xy[0] - sign * delta, left_xy[1]),
-            (right_xy[0] + sign * delta, right_xy[1]),
+    z_front = smooth.bilinear_cm(*front_xy)
+    front_px = SENSITIVITY_FRONT_MM * camera.fy / (z_front * 10.0)
+    pct = f"{SENSITIVITY_WIDTH_FRACTION:.0%}"
+    front_mm = f"{SENSITIVITY_FRONT_MM:.0f}mm"
+    wider = ((left_xy[0] - delta, left_xy[1]), (right_xy[0] + delta, right_xy[1]))
+    narrower = ((left_xy[0] + delta, left_xy[1]), (right_xy[0] - delta, right_xy[1]))
+    lower = (front_xy[0], front_xy[1] + front_px)
+    higher = (front_xy[0], front_xy[1] - front_px)
+    # name: (left_xy, right_xy, front_xy, end_drop)
+    variants = {
+        f"side-width+{pct}": (*wider, front_xy, 0.0),
+        f"side-width-{pct}": (*narrower, front_xy, 0.0),
+        f"front+{front_mm}": (left_xy, right_xy, lower, 0.0),
+        f"front-{front_mm}": (left_xy, right_xy, higher, 0.0),
+        f"ends-{SENSITIVITY_END_DROP:.0%}": (
+            left_xy,
+            right_xy,
             front_xy,
-            jaw,
-            z_ref_cm,
+            SENSITIVITY_END_DROP,
+        ),
+    }
+    detail: dict[str, dict[str, float | None]] = {}
+    for name, (left, right, front, end_drop) in variants.items():
+        moved = _models(
+            depth, smooth, camera, left, right, front, jaw, z_ref_cm, end_drop=end_drop
         )
+        detail[name] = {}
         for model, value in base.circumferences.items():
             other = None if moved is None else moved.circumferences.get(model)
-            change = math.inf if other is None else abs(other / value - 1.0)
-            worst[model] = max(worst.get(model, 0.0), change)
-    return worst
+            detail[name][model] = None if other is None else other / value - 1.0
+    worst: dict[str, float | None] = {}
+    for model in base.circumferences:
+        changes = [abs(d[model]) for d in detail.values() if d[model] is not None]
+        worst[model] = max(changes) if changes else None
+    return worst, detail
 
 
 # -- public ---------------------------------------------------------------------------
@@ -613,6 +796,9 @@ def compute_neck_sag(
     :param depth: the 3x3-median float map the width used (default
         ``portrait.depth.median_filtered(3)``)
     :param skin: photo-size float skin matte (default from the portrait)
+    :returns: a :class:`NeckSagResult`; ``quality_reasons`` are the tape's
+        own (the width's are in the width result; the combination is
+        ``NeckWidthResult.circumference_quality``)
     """
     if width_result.status != nw.STATUS_OK:
         return NeckSagResult(status=SAG_STATUS_FAILED, message="no neck width")
@@ -635,6 +821,13 @@ def compute_neck_sag(
     z_chin = depth.distance_cm(chin_x, chin_y, nw.DEPTH_WINDOW_RADIUS)
     if z_chin is None:
         return NeckSagResult(status=SAG_STATUS_FAILED, message="no depth at the chin")
+    if not left_xy[0] < front_x < right_xy[0]:
+        return NeckSagResult(
+            status=SAG_STATUS_FAILED,
+            left_xy=left_xy,
+            right_xy=right_xy,
+            message="the facial midline is not between the neck sides (head turned?)",
+        )
     bottom = width_result.band[1] if width_result.band else photo_size[1] - 1
     front = find_front_point(
         skin, hair, smooth, camera, front_x, chin_y, bottom, z_chin
@@ -650,15 +843,18 @@ def compute_neck_sag(
         beard_border_y=front.beard_border_y,
         chin_end_y=front.chin_end_y,
     )
-    reasons = list(width_result.quality_reasons)
+    reasons: list[str] = []
+
+    def flag(text):
+        reasons.append(text)
+        result.warnings.append(text)
+
     if front.source == FRONT_SOURCE_INFERRED:
-        text = "front point inferred (no beard/chin boundary found)"
-        reasons.append(text)
-        result.warnings.append(text)
+        flag("front point inferred (no beard/chin boundary found)")
+    for text in front.flags:
+        flag(text)
     if front.y <= width_result.row_y:
-        text = "front point not below the side points (tape plane tilts upward)"
-        reasons.append(text)
-        result.warnings.append(text)
+        flag("front point not below the side points (tape plane tilts upward)")
 
     z_ref = width_result.left_depth_cm or z_chin
     base = _models(depth, smooth, camera, left_xy, right_xy, front_xy, jaw, z_ref)
@@ -679,30 +875,62 @@ def compute_neck_sag(
     if base.circle is not None:
         result.circle_centre_mm = (base.circle[0], base.circle[1])
         result.circle_radius_mm = base.circle[2]
+        result.circle_rms_mm = base.circle_rms
+        result.circle_span_deg = base.circle_span
     result.ellipse_b_mm = base.ellipse_b
     result.circumferences_mm = dict(base.circumferences)
     result.circumference_prior_ellipse_mm = nw.circumference_ellipse_range(base.width)
     result.profile_mm = base.profile
     result.path_3d_mm = base.path_3d
     if base.invalid_fraction > MAX_INVALID_SAMPLE_FRACTION:
-        text = f"{base.invalid_fraction:.0%} of the tape path has no depth"
-        reasons.append(text)
-        result.warnings.append(text)
+        flag(f"{base.invalid_fraction:.0%} of the tape path has no depth")
     if base.sagitta <= 0:
-        text = "front point not in front of the side points"
-        reasons.append(text)
-        result.warnings.append(text)
-    result.sensitivity = _sensitivity(
+        flag("front point not in front of the side points")
+    result.sensitivity, result.sensitivity_detail = _sensitivity(
         depth, smooth, camera, left_xy, right_xy, front_xy, jaw, z_ref, base
     )
     model = HEADLINE_MODEL if HEADLINE_MODEL in base.circumferences else MODEL_CIRCLE
     if model != HEADLINE_MODEL:
-        text = f"too few tape samples for the {HEADLINE_MODEL} model; headline is pi*W"
-        reasons.append(text)
-        result.warnings.append(text)
+        flag(
+            f"no usable {HEADLINE_MODEL} (too few tape samples or degenerate); headline is pi*W"
+        )
+    else:
+        _circle_quality(result, base, flag)
     result.headline_model = model
     result.headline_mm = base.circumferences[model]
     result.quality_reasons = reasons
     result.quality = nw.QUALITY_LOW if reasons else nw.QUALITY_GOOD
     result.status = SAG_STATUS_OK
     return result
+
+
+def _circle_quality(result: NeckSagResult, base: _Models, flag):
+    """The fitted-circle quality gate (module docstring, "Quality gate")."""
+    fitted = base.circumferences[MODEL_FITTED_CIRCLE]
+    pi_w = base.circumferences[MODEL_CIRCLE]
+    disagreement = fitted / pi_w - 1.0
+    if abs(disagreement) > MAX_CIRCLE_VS_WIDTH:
+        flag(
+            f"fitted circle and pi*W disagree by {disagreement:+.0%} (neck section "
+            "not round: the circle reads high on a flat front, low on a deep one)"
+        )
+    ratio = base.circle[2] / (base.width / 2.0)
+    low, high = CIRCLE_RADIUS_RATIO_RANGE
+    if not low <= ratio <= high:
+        flag(f"fitted radius {ratio:.2f}x the half width (outside {low}-{high})")
+    if base.circle_span is not None and base.circle_span < MIN_CIRCLE_SPAN_DEG:
+        flag(
+            f"the tape samples span only {base.circle_span:.0f} deg of the fitted circle "
+            f"(< {MIN_CIRCLE_SPAN_DEG:.0f})"
+        )
+    if base.circle_rms is not None and base.circle_rms > MAX_CIRCLE_RMS_MM:
+        flag(
+            f"tape samples {base.circle_rms:.1f} mm RMS off the fitted circle "
+            f"(> {MAX_CIRCLE_RMS_MM:.1f} mm)"
+        )
+    worst = result.sensitivity.get(MODEL_FITTED_CIRCLE)
+    if worst is not None and worst > MAX_HEADLINE_SENSITIVITY:
+        flag(
+            f"fitted circle moves by up to {worst:.0%} with the key points "
+            f"(> {MAX_HEADLINE_SENSITIVITY:.0%}; see sensitivity_detail)"
+        )
