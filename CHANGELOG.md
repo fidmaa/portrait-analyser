@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `neck_sag` module: the tape path around the front of the neck and
+  circumference models in its tilted cross-section plane.
+  `measure_neck_width` now attaches `result.sag` (`NeckSagResult`) to every
+  automatic `"ok"` result, plus the headline `result.circumference_mm` /
+  `result.circumference_model`. The front point is found on the FaceMesh
+  jaw-centre column below the chin: below the lower border of a beard (no
+  skin under the chin; the hair matte counts when it covers the beard) + 5
+  mm, and below the end of the chin's depth fall (midline slope back under
+  1.0 after a fall steeper than 1.5), whichever is lower; without either it
+  is inferred 40 mm below the chin ("front point inferred (no beard/chin
+  boundary found)", low quality). The path runs from the left side point
+  through the front point to the right one, shaped like the FaceMesh lower
+  jaw (172...152...397) scaled to the front point. Its samples (integration
+  map) define the plane (least squares with the front point; the 3-point
+  plane through the side points and the front point is reported as
+  `plane_tilt_3pt_deg`). Reported: `front_xy`, `front_source`,
+  `beard_border_y`, `chin_end_y`, `path`, `plane_tilt_deg`,
+  `front_drop_deg`, `plane_normal`, `plane_origin_mm`, `width_mm`,
+  `sagitta_mm`, `front_arc_mm`, `off_plane_rms_mm`, `circle_radius_mm`,
+  `ellipse_b_mm`, `circumferences_mm` for `fitted_circle` (headline),
+  `circle` (pi W), `arc_circle`, `sagitta_ellipse`, `fitted_ellipse`,
+  `circumference_prior_ellipse_mm`, the per-model `sensitivity` to the side
+  points (+-3 % pixel width), `profile_mm`/`path_3d_mm`, `quality`,
+  `quality_reasons`, `warnings`. `compute_neck_sag()` is public;
+  `lower_jaw_contour()`/`LowerJaw` in `neck_width`.
+
+### Changed
+
+- `measure_neck_width` side points: rows are searched from 3 mm below the
+  lower FaceMesh jaw angle (rows above the chin count only when both edges
+  lie outside the lower-jaw contour and not beyond the jaw angles; the 6.5
+  mm below the chin landmark stay skipped); the first/last row with skin
+  edges gets a one-sided slope instead of `no-slope`; an edge may run
+  outward going down up to |dx/dy| 0.6 (inward limit 0.35 unchanged); a
+  new `"flare"` rejection for an edge more than 6 mm outside the innermost
+  edge of that side above it (neck base / clavicle); only the first 10 mm of
+  the topmost clean run is used. New `search_top_y`. IMG_2363 moves from y
+  2669 (128.9 mm) up to the beard/neck boundary (y 2550, 124.0 mm);
+  IMG_2389 keeps its run (row 2215 instead of 2238, 134.5 mm); the other
+  validation photos keep their status. Legacy files unchanged.
+
 ## [0.9.0] - 2026-09-28
 
 ### Added

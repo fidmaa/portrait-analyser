@@ -73,6 +73,34 @@ and stability thresholds are **provisional heuristics** tuned on eight photos of
 one person; ``quality`` (``"good"``/``"low"`` with reasons) is the outlet for
 borderline cases.
 
+Which rows: the neck just below the jaw angles
+---------------------------------------------
+The side points are meant to be where a tape rests: where the neck
+silhouette leaves the jaw line, just below the jaw angles. Rows are searched
+from :data:`JAW_ANGLE_CLEARANCE_MM` below the lower FaceMesh jaw angle
+(172/397) -- or from :data:`CHIN_CLEARANCE_MM` below the chin when that is
+higher -- down to the band bottom (Vision's neck joint, unchanged). A row
+above the chin is a neck row only when both edges continue the jaw contour
+downward (outside the FaceMesh lower-jaw contour at that row, not beyond the
+jaw angles); rows between the chin and :data:`CHIN_CLEARANCE_MM` below it
+are the chin's own outline and are skipped. The topmost row with skin edges
+gets a one-sided edge slope (it has no row above; before it was always
+rejected), an edge may run *outward* going down up to
+:data:`MAX_OUTWARD_EDGE_SLOPE` (inward, the collar-V / jaw-line limit
+:data:`MAX_EDGE_SLOPE` stays), and an edge more than :data:`MAX_FLARE_MM`
+outside the innermost edge of that side in the rows above is the neck
+flaring into the shoulders (rejected, ``"flare"``). Only the first
+:data:`TOP_RUN_MM` of the topmost clean run is used. On the validation
+photos: IMG_2389 keeps its run (y 2215-2253, 134.5 mm; reported row 2215
+instead of 2238, same run); IMG_2363 moves up from y 2669 (33 mm below the
+chin, beside the shirt V) to y 2550-2572 at the beard/neck boundary where
+the user put the side points (123.9 mm; the user's clicked chord 120.7 mm).
+
+The tape around the front -- under the chin and a beard, in a tilted plane --
+and the circumference models built on it are in
+:mod:`~portrait_analyser.neck_sag` (``result.sag``, headline
+``result.circumference_mm``).
+
 Neck versus things beside it
 ----------------------------
 A hand, hair or other skin next to the neck widens the skin span. It is
@@ -110,10 +138,12 @@ person** (collar size 41 cm; manual width 130.3 mm on IMG_2386): the ellipse
 range 39-40 cm matches that person only because both errors are whatever
 they are on his photos. Treat the circumference as indicative.
 
-Repeatability: on the same person, IMG_2389 gives 134.5 mm and IMG_2363 (a
-collar-limited photo) gave 128.9 mm --
-about 4 % between photos, i.e. roughly +-1.6 cm of circumference. The ~1 %
-above is only the row-to-row stability within one photo. Validation:
+Repeatability: on the same person, IMG_2389 gives 134.5 mm and IMG_2363
+124.0 mm at the rows under the jaw angles (128.9 mm at the lower row the
+0.9.0 search picked) -- the width depends on the height it is taken at,
+8 % between these photos, i.e. roughly +-1.6 cm of pi * W. The ~1 % above
+is only the row-to-row stability within one photo. The tape-plane
+circumference (:mod:`~portrait_analyser.neck_sag`) gives 41.4 cm on both. Validation:
 IMG_2389 134.5 mm (Vision band); IMG_2386 carries no intrinsics
 (``"no-camera"`` by default; 133.4 mm with the prototype's assumed fx 2765
 passed as ``camera=``).
@@ -124,6 +154,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -131,6 +162,9 @@ from .apple_vision import BodyPose
 from .exceptions import AppleVisionError, AppleVisionUnavailable
 from .incisor import distance_3d_from_cm
 from .neck import ellipse_circumference
+
+if TYPE_CHECKING:
+    from .neck_sag import NeckSagResult
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +200,7 @@ REJECT_OFFCENTRE = "off-centre"
 REJECT_DEPTH_STEP = "depth-step"
 REJECT_WIDE = "wider-than-jaw"
 REJECT_DEPTH_ASYMMETRY = "depth-asymmetry"
+REJECT_FLARE = "flare"
 
 ADVICE_COLLAR = (
     "neck edges hidden by the collar or beard -- open or lower the collar and include "
@@ -195,6 +230,10 @@ REJECT_LABELS = {
         ADVICE_TURNED,
     ),
     REJECT_DEPTH_ASYMMETRY: ("left/right edge depths too different", ADVICE_TURNED),
+    REJECT_FLARE: (
+        "edge flares outward below the rows above (neck base / clavicle?)",
+        ADVICE_COLLAR,
+    ),
     REJECT_NO_DEPTH: ("no depth inside an edge", ADVICE_TOO_CLOSE),
     REJECT_NO_SLOPE: ("no skin edges next to the row (gap)", ADVICE_TOO_CLOSE),
 }
@@ -209,13 +248,44 @@ EDGES_OCCLUDED_MESSAGE = "neck edges not visible -- take the photo from further 
 FACE_MESH_CHIN_INDEX = 152
 FACE_MESH_NOSE_INDEX = 1
 FACE_MESH_JAW_INDICES = (172, 397)
+# The lower jaw contour (FaceMesh face oval), from the left jaw angle over the
+# chin to the right one. On the validation photos 172/397 sit at the gonion
+# (58/288 are already up on the ramus, 136/365 on the jaw's lower border).
+FACE_MESH_LOWER_JAW_INDICES = (
+    172,
+    136,
+    150,
+    149,
+    176,
+    148,
+    152,
+    377,
+    400,
+    378,
+    379,
+    365,
+    397,
+)
 
 # The neck sides lie roughly this far behind the chin (IMG_2389/2386: chin
 # 37 cm, edges 44-45 cm); used to convert mm to px for checks along the neck.
 NECK_BEHIND_CHIN_CM = 8.0
 
-# Rows start this far below the chin (the chin's own outline is not the neck).
+# Rows start this far below the chin (the chin's own outline is not the neck)
+# ...
 CHIN_CLEARANCE_MM = 6.5
+# ... or, when higher, this far below the lower of the two jaw angles
+# (FaceMesh 172/397): the neck sides the tape rests on emerge from under the
+# jaw angles, usually above the chin level. Rows above the chin are only
+# neck rows when both edges continue the jaw contour downward: outside the
+# FaceMesh lower-jaw contour at that row by JAW_CONTOUR_MARGIN_MM (else the
+# skin edge is the jaw line itself) and not beyond the jaw angle by more than
+# JAW_ANGLE_OUTSIDE_MM (else it is the cheek / face outline). Other rows
+# above the chin are face rows and are skipped (not neck rows, so not
+# counted as rejections).
+JAW_ANGLE_CLEARANCE_MM = 3.0
+JAW_CONTOUR_MARGIN_MM = 3.0
+JAW_ANGLE_OUTSIDE_MM = 5.0
 
 # Band bottom without Apple Vision: this far below the chin. The clean
 # silhouette rows on the validation photos lie 9-40 mm below the chin, and
@@ -268,6 +338,20 @@ MAX_EDGE_BEHIND_CHIN_CM = 20.0
 # +-EDGE_SLOPE_BASELINE_MM of the row.
 MAX_EDGE_SLOPE = 0.35
 EDGE_SLOPE_BASELINE_MM = 2.0
+# That limit applies to edges running *inward* going down (collar V, jaw
+# line). An edge running *outward* going down is the neck silhouette widening
+# towards its base; at the top of the neck, where the tape goes, it may run
+# out at up to this |dx/dy| (~31 degrees; IMG_2363's right side leaves the
+# beard at 0.4-0.5) before the row is rejected as oblique. At the topmost
+# (or bottommost) row with skin edges the slope is taken one-sided.
+MAX_OUTWARD_EDGE_SLOPE = 0.6
+# Continuity: the neck edges continue the jaw contour downward. An edge
+# lying more than this outside the innermost edge of that side in the rows
+# above (from the top of the neck down) is the neck flaring into the
+# shoulders / clavicle / decolletage, not the neck under the jaw: the row is
+# rejected ("flare"). IMG_2363: the right edge leaves the beard at x 2070
+# and flares to 2125 (9 mm) 12 mm lower.
+MAX_FLARE_MM = 6.0
 
 # Reference for "is the neck under the face": the FaceMesh jaw centre
 # (172/397; the chin landmark when they are missing), compared with the neck
@@ -327,6 +411,12 @@ MIN_VISIBLE_NECK_MM = 10.0
 # A clean run is broken by a gap (rows without skin edges) taller than this.
 MAX_RUN_GAP_MM = 3.0
 
+# Of the topmost clean run only the rows within this far below its first row
+# are used (the neck sides just below the jaw; IMG_2389's run spans 5 mm,
+# IMG_2363's 3.5 mm). A fully visible neck no longer gives the median of
+# its whole length.
+TOP_RUN_MM = 10.0
+
 # Horizontal rows measure W / cos(roll) on a rolled head/neck: warn (and
 # mark low quality) above this.
 MAX_ROLL_DEG = 8.0
@@ -347,7 +437,8 @@ class NeckWidthRow:
     is None for a clean row, else why the row was not used, and
     ``reject_codes`` the same as :data:`REJECT_LABELS` keys. Depths in cm;
     None where invalid. ``left_slope``/``right_slope``: signed ``dx/dy`` of
-    the edge over +-:data:`EDGE_SLOPE_BASELINE_MM` (None = not evaluated).
+    the edge over +-:data:`EDGE_SLOPE_BASELINE_MM`, one-sided at the first
+    and last row with skin edges (None = not evaluated).
     """
 
     y: float
@@ -419,6 +510,13 @@ class NeckWidthResult:
         labels in :data:`REJECT_LABELS`), most frequent first
     :ivar chin: ``(x, y)`` chin landmark used, photo px
     :ivar neck_joint: Vision ``(x, y, confidence)`` neck joint, or None
+    :ivar search_top_y: first row searched (just below the jaw angles, or
+        :data:`CHIN_CLEARANCE_MM` below the chin), photo px
+    :ivar sag: :class:`~portrait_analyser.neck_sag.NeckSagResult` -- the tape
+        path with its front sag and the tilted-plane circumference models
+        (automatic ``"ok"`` results only; None otherwise)
+    :ivar circumference_mm: the headline circumference (``sag.headline_mm``,
+        model ``circumference_model``), or None
     """
 
     status: str
@@ -445,6 +543,10 @@ class NeckWidthResult:
     reject_counts: dict[str, int] = field(default_factory=dict)
     chin: tuple[float, float] | None = None
     neck_joint: tuple[float, float, float] | None = None
+    search_top_y: float | None = None
+    sag: NeckSagResult | None = None
+    circumference_mm: float | None = None
+    circumference_model: str | None = None
 
 
 def circumference_circle(width_mm: float) -> float:
@@ -468,6 +570,71 @@ def circumference_ellipse_range(
 def _px_per_mm(camera, z_cm: float) -> float:
     """Photo pixels per mm (x axis) at camera distance ``z_cm``."""
     return camera.fx / (z_cm * 10.0)
+
+
+@dataclass
+class LowerJaw:
+    """FaceMesh lower jaw contour in photo px: ``left``/``right`` halves
+    (jaw angle -> chin, as ``(x, y)`` arrays), the jaw angles and
+    ``angle_y`` (the lower of the two jaw angles)."""
+
+    points: np.ndarray
+    left: np.ndarray
+    right: np.ndarray
+    left_angle: tuple[float, float]
+    right_angle: tuple[float, float]
+
+    @property
+    def angle_y(self) -> float:
+        return max(self.left_angle[1], self.right_angle[1])
+
+    def contour_x(self, y: float) -> tuple[float, float]:
+        """Left/right contour x at photo row ``y`` (clamped to the jaw angle
+        above it and to the chin below it)."""
+        out = []
+        for half in (self.left, self.right):
+            order = np.argsort(half[:, 1])
+            out.append(float(np.interp(y, half[order, 1], half[order, 0])))
+        return out[0], out[1]
+
+
+def lower_jaw_contour(landmarks) -> LowerJaw | None:
+    """The FaceMesh lower jaw contour (:data:`FACE_MESH_LOWER_JAW_INDICES`),
+    or None without the full mesh or when it is not a U open upward (jaw
+    angles not left/right of the chin and above it)."""
+    if landmarks is None or len(landmarks) <= max(FACE_MESH_LOWER_JAW_INDICES):
+        return None
+    points = np.array(
+        [[float(v) for v in landmarks[i][:2]] for i in FACE_MESH_LOWER_JAW_INDICES]
+    )
+    mid = FACE_MESH_LOWER_JAW_INDICES.index(FACE_MESH_CHIN_INDEX)
+    left, right = points[: mid + 1], points[mid:]
+    chin = points[mid]
+    left_angle, right_angle = tuple(points[0]), tuple(points[-1])
+    if not (
+        left_angle[0] < chin[0] < right_angle[0]
+        and left_angle[1] < chin[1]
+        and right_angle[1] < chin[1]
+    ):
+        return None
+    return LowerJaw(points, left, right, left_angle, right_angle)
+
+
+def _continues_jaw(edges, y, jaw: LowerJaw | None, px_mm: float) -> bool:
+    """Whether skin edges at a row above the chin are the neck continuing
+    the jaw contour downward: outside the lower-jaw contour at that row by
+    :data:`JAW_CONTOUR_MARGIN_MM` and not beyond the jaw angles by more than
+    :data:`JAW_ANGLE_OUTSIDE_MM`. False without a jaw contour (such rows
+    are then face rows)."""
+    if jaw is None:
+        return False
+    left_c, right_c = jaw.contour_x(y)
+    margin = JAW_CONTOUR_MARGIN_MM * px_mm
+    outside = JAW_ANGLE_OUTSIDE_MM * px_mm
+    return (
+        jaw.left_angle[0] - outside <= edges[0] <= left_c - margin
+        and right_c + margin <= edges[1] <= jaw.right_angle[0] + outside
+    )
 
 
 def _landmarks(face_mesh):
@@ -688,10 +855,13 @@ def _apply_shape_checks(
     """Reject rows whose edges are oblique, off-centre under the face, with
     something nearer than the neck beside it, implausibly wide for the jaw
     or at very different depths (see the module constants)."""
-    if edges_above is not None and edges_below is not None:
-        span = 2.0 * baseline_px
-        row.left_slope = (edges_below[0] - edges_above[0]) / span
-        row.right_slope = (edges_below[1] - edges_above[1]) / span
+    if edges_above is not None or edges_below is not None:
+        # Central difference; one-sided at the top (or bottom) of the skin.
+        upper = edges_above if edges_above is not None else (row.left_x, row.right_x)
+        lower = edges_below if edges_below is not None else (row.left_x, row.right_x)
+        span = baseline_px * ((edges_above is not None) + (edges_below is not None))
+        row.left_slope = (lower[0] - upper[0]) / span
+        row.right_slope = (lower[1] - upper[1]) / span
     else:
         row.left_slope = row.right_slope = None
     reasons = [] if row.reject_reason is None else [row.reject_reason]
@@ -705,7 +875,9 @@ def _apply_shape_checks(
         reject(REJECT_NO_SLOPE, "edge slope unknown (no skin edges next to the row)")
     else:
         for side, slope in (("left", row.left_slope), ("right", row.right_slope)):
-            if abs(slope) > MAX_EDGE_SLOPE:
+            # Positive = the edge runs inward (towards the midline) going down.
+            inward = slope if side == "left" else -slope
+            if inward > MAX_EDGE_SLOPE or -inward > MAX_OUTWARD_EDGE_SLOPE:
                 reject(
                     REJECT_OBLIQUE,
                     f"{side} edge oblique (|dx/dy| {abs(slope):.2f}; collar V?)",
@@ -715,6 +887,19 @@ def _apply_shape_checks(
                 else:
                     row.right_ok = False
     px_mm = context["px_per_mm"]
+    flare_ref = context.get("flare_ref")
+    if flare_ref is not None:
+        limit = MAX_FLARE_MM * px_mm
+        for side, outward in (
+            ("left", None if flare_ref[0] is None else flare_ref[0] - row.left_x),
+            ("right", None if flare_ref[1] is None else row.right_x - flare_ref[1]),
+        ):
+            if outward is not None and outward > limit:
+                reject(
+                    REJECT_FLARE,
+                    f"{side} edge {outward / px_mm:.0f} mm outside the edge above "
+                    "(neck base / clavicle flare?)",
+                )
     offcentre = _offcentre_mm(row, context)
     if row.right_x <= row.left_x:
         reject(REJECT_OFFCENTRE, "edges crossed")
@@ -965,7 +1150,7 @@ def measure_neck_width(
     px_mm = _px_per_mm(camera, z_chin)
     skin = _skin_array(portrait.skinmap, photo_size)
     step = max(1.0, ROW_STEP_MM * px_mm)
-    y = chin_y + CHIN_CLEARANCE_MM * px_mm
+    y = chin_top = chin_y + CHIN_CLEARANCE_MM * px_mm
     baseline = EDGE_SLOPE_BASELINE_MM * px_mm
     # Metric checks along the neck use its (not the chin's) distance: the
     # neck sides are ~8 cm behind the chin. Approximated by the chin depth
@@ -990,24 +1175,45 @@ def measure_neck_width(
             min_span_px=SKIN_MIN_SPAN_MM * px_mm,
         )
 
+    jaw = lower_jaw_contour(landmarks)
+    if jaw is not None:
+        y = min(y, jaw.angle_y + JAW_ANGLE_CLEARANCE_MM * px_mm)
+    result.search_top_y = float(round(y))
+    # Innermost clean edge per side so far (the flare reference).
+    flare_ref = context["flare_ref"] = [None, None]
     while y <= bottom:
         row_y = float(round(y))
-        edges = edges_at(row_y)
-        if edges is not None:
-            row = _evaluate_edges(
-                depth, camera, photo_size, (edges[0], row_y), (edges[1], row_y), z_chin
-            )
-            _apply_shape_checks(
-                row,
-                edges_at(row_y - baseline),
-                edges_at(row_y + baseline),
-                baseline,
-                context,
-            )
-            result.rows.append(row)
         y += step
+        edges = edges_at(row_y)
+        if edges is None:
+            continue
+        if row_y < chin_top and not (
+            row_y < chin_y and _continues_jaw(edges, row_y, jaw, px_mm)
+        ):
+            # A face row (jaw line / cheek), or the chin's own outline
+            # (CHIN_CLEARANCE_MM below the chin landmark): not yet the neck.
+            continue
+        row = _evaluate_edges(
+            depth, camera, photo_size, (edges[0], row_y), (edges[1], row_y), z_chin
+        )
+        _apply_shape_checks(
+            row,
+            edges_at(row_y - baseline),
+            edges_at(row_y + baseline),
+            baseline,
+            context,
+        )
+        result.rows.append(row)
+        if REJECT_FLARE not in row.reject_codes:
+            if row.left_ok and (flare_ref[0] is None or row.left_x > flare_ref[0]):
+                flare_ref[0] = row.left_x
+            if row.right_ok and (flare_ref[1] is None or row.right_x < flare_ref[1]):
+                flare_ref[1] = row.right_x
 
     run = _topmost_clean_run(result.rows, MAX_RUN_GAP_MM * px_mm)
+    # Only the first rows of the run: the side points the tape rests on,
+    # just below the jaw angles, not the middle of a long clean neck.
+    run = [r for r in run if r.y - run[0].y <= TOP_RUN_MM * neck_px_mm]
     stable = []
     if run:
         median = float(np.median([r.width_mm for r in run]))
@@ -1057,7 +1263,36 @@ def measure_neck_width(
     result.warnings.extend(_edge_warnings(chosen))
     _assess_quality(result, stable, context)
     result.status = STATUS_OK
-    return _finish(result, chosen, width)
+    _finish(result, chosen, width)
+    _attach_sag(portrait, result, landmarks, camera, depth, skin)
+    return result
+
+
+def _attach_sag(portrait, result: NeckWidthResult, landmarks, camera, depth, skin):
+    """Tape path and tilted-plane circumference (:mod:`~portrait_analyser.neck_sag`)
+    for an ``"ok"`` width; sets ``sag`` and the ``circumference_mm`` headline.
+    A failure is logged and reported in ``sag``/``warnings``; the width stands."""
+    from .neck_sag import (
+        SAG_STATUS_FAILED,
+        SAG_STATUS_OK,
+        NeckSagResult,
+        compute_neck_sag,
+    )
+
+    try:
+        result.sag = compute_neck_sag(
+            portrait, result, landmarks, camera=camera, depth=depth, skin=skin
+        )
+    except (ValueError, ArithmeticError, np.linalg.LinAlgError) as exc:
+        logger.exception("neck sag / tape-plane computation failed")
+        result.sag = NeckSagResult(
+            status=SAG_STATUS_FAILED, message=f"{type(exc).__name__}: {exc}"
+        )
+    if result.sag.status == SAG_STATUS_OK:
+        result.circumference_mm = result.sag.headline_mm
+        result.circumference_model = result.sag.headline_model
+    else:
+        result.warnings.append(f"no tape-plane circumference: {result.sag.message}")
 
 
 def _count_rejections(rows) -> dict[str, int]:

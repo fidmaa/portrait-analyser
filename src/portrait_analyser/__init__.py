@@ -89,9 +89,12 @@ from .pose import (
     detect_face_mesh,
     detect_neck_midpoint,
 )
+from .neck_sag import NeckSagResult, compute_neck_sag
 from .neck_width import (
+    LowerJaw,
     NeckWidthResult,
     NeckWidthRow,
+    lower_jaw_contour,
     circumference_ellipse_range,
     circumference_circle,
     measure_neck_width,
@@ -115,6 +118,10 @@ __all__ = [
     "detect_body_pose",
     "NeckWidthResult",
     "NeckWidthRow",
+    "NeckSagResult",
+    "compute_neck_sag",
+    "LowerJaw",
+    "lower_jaw_contour",
     "circumference_ellipse_range",
     "circumference_circle",
     "ellipse_circumference",
