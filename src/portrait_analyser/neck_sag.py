@@ -107,8 +107,11 @@ of the path has no depth; when the headline falls back to pi W; and for the
 fitted circle when (a) it and pi W disagree by more than
 :data:`MAX_CIRCLE_VS_WIDTH` (flags the flat-front case: +15 % at
 front-back 48 mm; IMG_2389 -1 %, IMG_2363 +7 %), (b) ``R / (W/2)`` is
-outside :data:`CIRCLE_RADIUS_RATIO_RANGE` (validation 0.96-1.15; a
-radius beyond :data:`MAX_FIT_RADIUS_FACTOR` x W/2 is no circle at all),
+outside :data:`CIRCLE_RADIUS_RATIO_RANGE` -- note R/(W/2) equals
+fitted circle / pi W, so with the current constants (a) already bounds it
+to 0.9-1.1 and (b) cannot fire; it is kept only as a backstop in case (a)
+is relaxed (a radius beyond :data:`MAX_FIT_RADIUS_FACTOR` x W/2 is no
+circle at all),
 (c) the samples span less than :data:`MIN_CIRCLE_SPAN_DEG` of it
 (validation 106-138 degrees) or lie more than :data:`MAX_CIRCLE_RMS_MM`
 RMS off it (validation 0.2-1.2 mm), or (d) a perturbation moves it by more
