@@ -29,6 +29,7 @@ from .face import (
     find_incisor_distance_teeth,
     teeth_threshold,
 )
+from .heif_depth import read_heif_depth
 from .incisor import depth_raw_to_distance_cm, distance_3d_from_cm
 
 logger = logging.getLogger(__name__)
@@ -432,19 +433,30 @@ def _read_apple_depth_info(fileName):
 
 
 def _load_depth_via_apple(fileName, pyheif_error):
-    """Read a depth map pyheif could not decode (16-bit disparity) via macOS.
+    """Read a depth map pyheif could not decode (16-bit disparity).
 
-    :raises NoDepthMapFound: when the macOS reader is unavailable, fails or
-        finds no depth -- chained to the underlying error.
+    macOS ImageIO/AVFoundation first (where available); otherwise -- or when
+    pyobjc is missing -- the cross-platform reader in
+    :mod:`portrait_analyser.heif_depth` (raw item bytes + imagecodecs + XMP).
+
+    :raises NoDepthMapFound: when no reader can produce the depth map --
+        chained to the underlying error.
     """
     try:
         apple = read_apple_depth(fileName)
     except AppleDepthUnavailable as exc:
-        raise NoDepthMapFound(
-            f"{fileName}: pyheif cannot decode the depth map ({pyheif_error}); "
-            "this format (16-bit disparity) needs the macOS ImageIO/AVFoundation "
-            f"reader, which is unavailable here: {exc}"
-        ) from exc
+        logger.info(
+            "%s: macOS depth reader unavailable (%s); using the imagecodecs reader",
+            fileName,
+            exc,
+        )
+        try:
+            apple = read_heif_depth(fileName)
+        except AppleDepthDecodeError as heif_exc:
+            raise NoDepthMapFound(
+                f"{fileName}: neither pyheif ({pyheif_error}) nor the imagecodecs "
+                f"reader could decode the depth map: {heif_exc}"
+            ) from heif_exc
     except AppleDepthDecodeError as exc:
         raise NoDepthMapFound(
             f"{fileName}: neither pyheif ({pyheif_error}) nor the macOS reader "
@@ -453,7 +465,7 @@ def _load_depth_via_apple(fileName, pyheif_error):
     if apple is None:
         raise NoDepthMapFound(
             f"{fileName}: pyheif cannot decode the depth map ({pyheif_error}) and "
-            "ImageIO finds no depth/disparity data"
+            "no depth/disparity data was found"
         ) from pyheif_error
     return apple
 
@@ -762,13 +774,14 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         # Decode depth map. Camera-app files carry 8-bit disparity pyheif can
         # decode; the TrueDepth capture app stores 16-bit disparity, which
         # pyheif rejects ("Unsupported JPEG data precision 16") -- those are
-        # read via macOS ImageIO/AVFoundation instead (see apple_depth.py).
+        # read via macOS ImageIO/AVFoundation (apple_depth.py) or, elsewhere,
+        # via imagecodecs + the item's XMP (heif_depth.py).
         apple_depth = None
         try:
             depth_loaded = _load_pyheif_depth(primary_image)
         except pyheif.error.HeifError as exc:
             logger.info(
-                "%s: pyheif cannot decode the depth map (%s); using the macOS reader",
+                "%s: pyheif cannot decode the depth map (%s); using a 16-bit depth reader",
                 fileName,
                 exc,
             )

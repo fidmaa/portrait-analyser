@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `heif_depth.read_heif_depth`: cross-platform reader for 16-bit
+  lossless-JPEG depth/disparity aux images (original iPhone 17 Pro / iOS 26
+  portraits), which libheif's JPEG plugin cannot decode (8-bit libjpeg path
+  only). It reads the item's raw bytes via `iloc`, decodes them with
+  `imagecodecs`, and maps them to metres with the item's XMP `apdi:` keys
+  (rounding disparity through float16 like AVFoundation). It returns the same
+  `AppleDepthData` as the macOS reader. `load_image` uses it whenever the
+  macOS ImageIO/AVFoundation reader is unavailable, so these photos now open
+  on Linux.
+
+### Changed
+
+- Linux: `pyheif>=0.8.0` (manylinux wheel with bundled libheif); building
+  pyheif no longer needs `libheif-dev`. New dependency: `imagecodecs`.
+
 ## [0.10.0] - 2026-09-29
 
 ### Added

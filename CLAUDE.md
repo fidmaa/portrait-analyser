@@ -29,7 +29,12 @@ There is no configured linter (no `[tool.ruff]` / pre-commit) — don't invent l
 
 ### Platform-specific HEIF dependency
 - **macOS/Darwin**: uses `pyheif-iplweb`
-- **Linux**: uses `pyheif` (requires system packages `libheif-dev`, `libde265-dev` — see `.github/workflows/build.yml`)
+- **Linux**: uses `pyheif>=0.8.0` (manylinux wheel, bundled libheif; no apt packages needed)
+- **16-bit lossless-JPEG depth** (original iPhone 17 Pro / iOS 26 captures): libheif cannot decode it on any
+  platform. `ios.load_image` reads it via macOS ImageIO/AVFoundation (`apple_depth.py`) when available, else
+  via `heif_depth.py` (raw `iloc` bytes + `imagecodecs` + the item's XMP `apdi:`/`depthData:` keys). Both return
+  `AppleDepthData`. Set `PORTRAIT_ANALYSER_16BIT_SAMPLES=<folder>` to run `tests/test_heif_depth.py` on real files;
+  on macOS that also cross-checks the two readers pixel by pixel.
 
 ### Test fixtures
 `tests/*.heic` / `*.jpg` are real (anonymized) iPhone Portrait Mode captures used across the suite via fixtures in `tests/conftest.py` (`heic_image_path`, `heic_face_image_path`, `jpeg_depth_data_path`, `jpeg_no_depth_data_path`). Don't add new photo fixtures without stripping GPS/location EXIF first — prior fixtures leaked precise GPS coordinates (see CHANGELOG/git history around the v0.4.x releases).

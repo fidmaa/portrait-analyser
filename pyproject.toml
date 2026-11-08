@@ -36,7 +36,11 @@ dependencies = [
     # distribution mediapipe installs, so no opencv-python/contrib clash.
     "opencv-contrib-python>=4.8",
     "pyheif-iplweb>=0.7.1.dev1176; sys_platform == 'darwin'",
-    "pyheif>=0.7.1; sys_platform == 'linux'",
+    # 0.8.0 is the first release with manylinux wheels (bundled libheif); 0.7.1
+    # is sdist-only and its cffi struct layout no longer matches system libheif.
+    "pyheif>=0.8.0; sys_platform == 'linux'",
+    # Decodes 16-bit lossless-JPEG depth maps that libheif cannot (heif_depth.py).
+    "imagecodecs>=2024.1.1",
     "pyobjc-framework-quartz>=12.2 ; sys_platform == 'darwin'",
     "pyobjc-framework-avfoundation>=12.2 ; sys_platform == 'darwin'",
     "pyobjc-framework-vision>=12.2 ; sys_platform == 'darwin'",

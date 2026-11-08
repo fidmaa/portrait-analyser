@@ -439,10 +439,12 @@ def test_aux_orientation_is_preferred(
 # --------------------------------------------------------------------------
 
 
-def test_16_bit_depth_without_macos_raises_no_depth_map_found(
+def test_16_bit_depth_without_macos_falls_back_and_explains_failure(
     monkeypatch, heic_face_image_path
 ):
-    """What Linux CI sees for a capture-app file: a chained, explained error."""
+    """Without macOS the imagecodecs reader takes over; when it cannot read
+    the file either (this fixture's depth is HEVC, not 16-bit JPEG) the error
+    is chained and explained."""
     monkeypatch.setattr(ios, "_load_pyheif_depth", _heif_16_bit_error)
 
     def unavailable(path):
@@ -450,9 +452,10 @@ def test_16_bit_depth_without_macos_raises_no_depth_map_found(
 
     monkeypatch.setattr(ios, "read_apple_depth", unavailable)
 
-    with pytest.raises(NoDepthMapFound, match="16-bit disparity") as excinfo:
+    with pytest.raises(NoDepthMapFound, match="imagecodecs reader") as excinfo:
         ios.load_image(str(heic_face_image_path))
-    assert isinstance(excinfo.value.__cause__, AppleDepthUnavailable)
+    assert isinstance(excinfo.value.__cause__, AppleDepthDecodeError)
+    assert "not JPEG-coded" in str(excinfo.value)
 
 
 def test_16_bit_depth_decode_failure_is_chained(monkeypatch, heic_face_image_path):

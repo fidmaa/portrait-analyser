@@ -5,6 +5,7 @@ from .apple_depth import (
     encode_depth_as_disparity_8bit,
     read_apple_depth,
 )
+from .heif_depth import read_heif_depth
 from .camera import (
     CameraModel,
     intrinsics_in_photo_space,
@@ -112,6 +113,7 @@ __all__ = [
     "AppleDepthDecodeError",
     "AppleDepthUnavailable",
     "read_apple_depth",
+    "read_heif_depth",
     "AppleVisionError",
     "AppleVisionUnavailable",
     "BodyPose",

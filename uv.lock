@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.12.*"
 
 [[package]]
@@ -97,6 +97,26 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/d9/71/fd2ea96cdc512d92da5678a1c98c267ddd4d8c5130b76d0f7a80f9a9fde8/fonttools-4.61.1-cp312-cp312-win32.whl", hash = "sha256:75da8f28eff26defba42c52986de97b22106cb8f26515b7c22443ebc9c2d3261", size = 2269060, upload-time = "2025-12-12T17:30:18.058Z" },
     { url = "https://files.pythonhosted.org/packages/80/3b/a3e81b71aed5a688e89dfe0e2694b26b78c7d7f39a5ffd8a7d75f54a12a8/fonttools-4.61.1-cp312-cp312-win_amd64.whl", hash = "sha256:497c31ce314219888c0e2fce5ad9178ca83fe5230b01a5006726cdf3ac9f24d9", size = 2319078, upload-time = "2025-12-12T17:30:22.862Z" },
     { url = "https://files.pythonhosted.org/packages/c7/4e/ce75a57ff3aebf6fc1f4e9d508b8e5810618a33d900ad6c19eb30b290b97/fonttools-4.61.1-py3-none-any.whl", hash = "sha256:17d2bf5d541add43822bcf0c43d7d847b160c9bb01d15d5007d84e2217aaa371", size = 1148996, upload-time = "2025-12-12T17:31:21.03Z" },
+]
+
+[[package]]
+name = "imagecodecs"
+version = "2026.10.10"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/28/7d/1658ab284e024562f1fd3a684dded89b97125789743e0d1f57a494b64290/imagecodecs-2026.10.10.tar.gz", hash = "sha256:cde6914505668196b15e0f99dbc236b779e3b61217f04d2e498cbae790965f9f", size = 9685030, upload-time = "2026-10-09T22:45:38.598Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d8/29/df387ef1c428fd564274c742e0cc71a30506f278699528be1d3fa9e48ad5/imagecodecs-2026.10.10-cp312-abi3-macosx_12_0_arm64.whl", hash = "sha256:7e422e8fb55c717f90d5ead73374178546ad3372de584ee2b3c34f95ba6fa508", size = 13373607, upload-time = "2026-10-09T22:44:07.364Z" },
+    { url = "https://files.pythonhosted.org/packages/0c/3c/80a0d3589a94348dee7904539c1d7a1e3ebd206a9b9ffc285c7352837a42/imagecodecs-2026.10.10-cp312-abi3-macosx_12_0_x86_64.whl", hash = "sha256:83a2b581868be7c3cbb095a300b1905639f3af4cd8ca6b59f84d176b5487ce27", size = 14983456, upload-time = "2026-10-09T22:44:10.899Z" },
+    { url = "https://files.pythonhosted.org/packages/29/33/a81db6af388919bbebcfc67eec127f7d91fbac0786497755989aa5b0d790/imagecodecs-2026.10.10-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:fe277d351622d4b53c637cf67c27202d485ee77aa33eaf99e9b55a79401831ab", size = 28763055, upload-time = "2026-10-09T22:44:16.009Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/3e/a3fadd95592572bd97d5034eecf31862ef921f977d96e4da542b6613d6b2/imagecodecs-2026.10.10-cp312-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:934ac2cd2d367cf6c891ee108627c47df85f21eea949adf3cf293d1fa8933e3f", size = 28350094, upload-time = "2026-10-09T22:44:20.646Z" },
+    { url = "https://files.pythonhosted.org/packages/17/80/3eedccc767d6ed2569ec2e1b759c1189d5db2fb09cfb542328778ef08ef3/imagecodecs-2026.10.10-cp312-abi3-pyemscripten_2025_0_wasm32.whl", hash = "sha256:a1d73a8962314ccf1ecf447c8646334f3084763c8f5c5610a30a61049d4fabbd", size = 4085560, upload-time = "2026-10-09T22:44:23.343Z" },
+    { url = "https://files.pythonhosted.org/packages/00/dd/9641540f5d34ad10aef4f44a6b4b919ef055e366a98c41e2b8f5decb6d6d/imagecodecs-2026.10.10-cp312-abi3-pyemscripten_2026_0_wasm32.whl", hash = "sha256:e9518d868cd862d17c9cb721435054c54671e30a01d385a8e263d07c2bbb83b8", size = 4068999, upload-time = "2026-10-09T22:44:25.302Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/81/728ab363b2677c45362f319b31fc442ad4e081425299546bc87b159e9a7f/imagecodecs-2026.10.10-cp312-abi3-win32.whl", hash = "sha256:dcc7098ab119fc7e9c8770f2305611f72cdc6c9c9bf5d157d3bca7a3a4e526ba", size = 14860487, upload-time = "2026-10-09T22:44:28.164Z" },
+    { url = "https://files.pythonhosted.org/packages/50/66/e83fe8867a4170b12a6a2a4721cbb764fd10f5a27291dc38dd9e1c2fa898/imagecodecs-2026.10.10-cp312-abi3-win_amd64.whl", hash = "sha256:6d02701315531283d6b6434dd871f17c1298c94be97dcd0ed590082d9a0b1f02", size = 19132594, upload-time = "2026-10-09T22:44:32.017Z" },
+    { url = "https://files.pythonhosted.org/packages/30/e7/24278542aef5e5afcb58fb13ec60ecb05f4c9c0c232156aeb9c4163fa42d/imagecodecs-2026.10.10-cp312-abi3-win_arm64.whl", hash = "sha256:250af78a96689ea9a23345dd9a7ef6579b7439887d7fe9fe76db5f97a5bbf8da", size = 15824882, upload-time = "2026-10-09T22:44:36.444Z" },
 ]
 
 [[package]]
@@ -261,6 +281,7 @@ name = "portrait-analyser"
 version = "0.10.0"
 source = { editable = "." }
 dependencies = [
+    { name = "imagecodecs" },
     { name = "mediapipe" },
     { name = "numpy" },
     { name = "opencv-contrib-python" },
@@ -285,13 +306,14 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "imagecodecs", specifier = ">=2024.1.1" },
     { name = "mediapipe", specifier = ">=0.10.0" },
     { name = "mediapipe", marker = "extra == 'pose'", specifier = ">=0.10.30" },
     { name = "numpy", specifier = ">=1.26.4" },
     { name = "opencv-contrib-python", specifier = ">=4.8" },
     { name = "piexif", specifier = ">=1.1.3" },
     { name = "pillow", specifier = ">=10.2.0" },
-    { name = "pyheif", marker = "sys_platform == 'linux'", specifier = ">=0.7.1" },
+    { name = "pyheif", marker = "sys_platform == 'linux'", specifier = ">=0.8.0" },
     { name = "pyheif-iplweb", marker = "sys_platform == 'darwin'", specifier = ">=0.7.1.dev1176" },
     { name = "pyobjc-framework-avfoundation", marker = "sys_platform == 'darwin'", specifier = ">=12.2" },
     { name = "pyobjc-framework-quartz", marker = "sys_platform == 'darwin'", specifier = ">=12.2" },
