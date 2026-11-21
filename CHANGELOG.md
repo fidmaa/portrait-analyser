@@ -21,7 +21,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   on Linux.
 - `scripts/compare_depth_readers.py`: dumps the depth read on Linux and
   compares it on macOS with Apple's ImageIO/AVFoundation reader, pixel by
-  pixel. Run on 97 original 16-bit portraits (Linux x86_64, libheif 1.18.2
+  pixel. Run on 97 original 16-bit portraits, all from an iPhone 17 Pro
+  (iOS 26.3.1, front TrueDepth camera); other models and iOS versions are
+  not verified (Linux x86_64, libheif 1.18.2
   vs macOS 26.5.2 arm64, libheif 1.23.7; `imagecodecs` 2026.10.10 on both):
   all 97 agree -- same shape, same invalid-pixel mask, same accuracy /
   quality / filtered / source type / intrinsics / orientation; the largest
