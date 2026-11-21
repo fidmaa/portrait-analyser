@@ -20,6 +20,7 @@ from .exceptions import (
     ExifValidationFailed,
     NoDepthMapFound,
     UnknownExtension,
+    UnverifiedDepthDevice,
 )
 from .face import (
     TEETH_MEASUREMENT_MIN_HEIGHT_FRACTION,
@@ -145,6 +146,7 @@ class IOSPortrait:
         depth=None,
         depth_repaired=None,
         depth_repair_check=None,
+        depth_device_verified=None,
     ):
         self.photo = photo
         self.depthmap = depthmap
@@ -195,6 +197,13 @@ class IOSPortrait:
         # DepthRepairCheck when the repair was evaluated (absolute
         # capture-app depth that failed the plausibility check), else None.
         self.depth_repair_check = depth_repair_check
+        # Only for 16-bit depth read by the imagecodecs reader (no macOS
+        # ImageIO/AVFoundation): True when the photo's device model is one
+        # that reader was checked on against Apple's
+        # (const.HEIF_DEPTH_VERIFIED_MODELS), False when it was loaded with
+        # allow_unverified_device=True -- distances may then be wrong. None
+        # for every other file (Apple's reader, or 8-bit depth).
+        self.depth_device_verified = depth_device_verified
         self._depth = depth
         # measure_neck_width result, computed on first access of neck_width.
         self._neck_width = _NOT_COMPUTED
@@ -316,8 +325,21 @@ class IOSPortrait:
         )
 
 
+def _exif_text(exif, tag):
+    value = exif.get("0th", {}).get(tag)
+    if isinstance(value, bytes):
+        value = value.decode("ascii", errors="replace")
+    if not isinstance(value, str):
+        return None
+    return value.strip("\x00 ") or None
+
+
 def _validate_exif(primary_image, use_exif):
-    """Extract and validate TrueDepth EXIF metadata."""
+    """Validate TrueDepth EXIF metadata; return the device ``(model, software)``.
+
+    Either is ``None`` when the file does not say.
+    """
+    model = software = None
     for exif_metadata in [
         metadata
         for metadata in primary_image.image.load().metadata
@@ -326,6 +348,9 @@ def _validate_exif(primary_image, use_exif):
         exif = piexif.load(exif_metadata["data"])
         if use_exif:
             check_exif_data(exif)
+        model = model or _exif_text(exif, piexif.ImageIFD.Model)
+        software = software or _exif_text(exif, piexif.ImageIFD.Software)
+    return model, software
 
 
 def _parse_depth_metadata(depth_image):
@@ -432,19 +457,49 @@ def _read_apple_depth_info(fileName):
     return None
 
 
-def _load_depth_via_apple(fileName, pyheif_error):
+def _load_depth_via_apple(fileName, pyheif_error, device=(None, None), allow_unverified_device=False):
     """Read a depth map pyheif could not decode (16-bit disparity).
 
     macOS ImageIO/AVFoundation first (where available); otherwise -- or when
     pyobjc is missing -- the cross-platform reader in
     :mod:`portrait_analyser.heif_depth` (raw item bytes + imagecodecs + XMP).
+    That reader is only trusted for the device models it was compared with
+    Apple's on (``const.HEIF_DEPTH_VERIFIED_MODELS``).
 
+    :param device: EXIF ``(model, software)`` of the photo.
+    :returns: ``(depth data, device_verified)``; ``device_verified`` is
+        ``None`` for Apple's reader, else whether the model is a verified one.
+    :raises UnverifiedDepthDevice: imagecodecs reader needed for a model it
+        was not verified on, without ``allow_unverified_device``.
     :raises NoDepthMapFound: when no reader can produce the depth map --
         chained to the underlying error.
     """
+    device_verified = None
     try:
         apple = read_apple_depth(fileName)
     except AppleDepthUnavailable as exc:
+        model, software = device
+        device_verified = model in const.HEIF_DEPTH_VERIFIED_MODELS
+        described = f"{model or 'unknown model'}, iOS {software or 'unknown'}"
+        verified_models = ", ".join(sorted(const.HEIF_DEPTH_VERIFIED_MODELS))
+        if not device_verified and not allow_unverified_device:
+            raise UnverifiedDepthDevice(
+                f"{fileName}: the depth map of this photo ({described}) can only be "
+                "read here by the imagecodecs reader, which has been checked against "
+                f"Apple's reader only for: {verified_models}. Another model may store "
+                "depth differently, so distances could be wrong. Pass "
+                "allow_unverified_device=True to load it anyway.",
+                model=model,
+                software=software,
+            ) from None
+        if not device_verified:
+            logger.warning(
+                "%s: reading depth of an unverified device (%s) with the imagecodecs "
+                "reader, checked only for: %s; distances may be wrong",
+                fileName,
+                described,
+                verified_models,
+            )
         logger.info(
             "%s: macOS depth reader unavailable (%s); using the imagecodecs reader",
             fileName,
@@ -467,7 +522,7 @@ def _load_depth_via_apple(fileName, pyheif_error):
             f"{fileName}: pyheif cannot decode the depth map ({pyheif_error}) and "
             "no depth/disparity data was found"
         ) from pyheif_error
-    return apple
+    return apple, device_verified
 
 
 def _apple_depth_for_photo(apple, fileName, photo_size):
@@ -744,8 +799,19 @@ def repair_inverted_depth(depth_m, skinmap, hairmap=None, *, focal_px=None, phot
     return reciprocal, check
 
 
-def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
-    """Load HEIC/HEIF with depth data, return an IOSPortrait instance."""
+def load_image(
+    fileName: str, use_exif=True, allow_unverified_device=False
+) -> Union[IOSPortrait, None]:
+    """Load HEIC/HEIF with depth data, return an IOSPortrait instance.
+
+    :param allow_unverified_device: 16-bit depth maps are read by Apple's
+        ImageIO/AVFoundation on macOS and by the imagecodecs reader
+        elsewhere. The latter has been checked against Apple's only for the
+        models in ``const.HEIF_DEPTH_VERIFIED_MODELS``; for any other model
+        ``load_image`` raises :class:`UnverifiedDepthDevice` unless this is
+        True. Loaded that way, ``portrait.depth_device_verified`` is False.
+        No effect on macOS with pyobjc, or on 8-bit depth maps.
+    """
     if not (fileName.lower().endswith("heic") or fileName.lower().endswith("heif")):
         raise UnknownExtension(
             "only supported extensions for filenames are: HEIF, HEIC"
@@ -755,7 +821,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         heif_container = pyheif.open_container(f)
 
         primary_image = heif_container.primary_image
-        _validate_exif(primary_image, use_exif)
+        device = _validate_exif(primary_image, use_exif)
 
         if primary_image.depth_image is None:
             raise NoDepthMapFound(f"{fileName} has no depth data")
@@ -776,7 +842,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         # pyheif rejects ("Unsupported JPEG data precision 16") -- those are
         # read via macOS ImageIO/AVFoundation (apple_depth.py) or, elsewhere,
         # via imagecodecs + the item's XMP (heif_depth.py).
-        apple_depth = None
+        apple_depth = depth_device_verified = None
         try:
             depth_loaded = _load_pyheif_depth(primary_image)
         except pyheif.error.HeifError as exc:
@@ -785,7 +851,9 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
                 fileName,
                 exc,
             )
-            apple_depth = _load_depth_via_apple(fileName, exc)
+            apple_depth, depth_device_verified = _load_depth_via_apple(
+                fileName, exc, device, allow_unverified_device
+            )
 
         depth_m = depth_accuracy = depth_filtered = None
         depth_image = float_min = float_max = None
@@ -1086,6 +1154,7 @@ def load_image(fileName: str, use_exif=True) -> Union[IOSPortrait, None]:
         depth=depth,
         depth_repaired=depth_repaired,
         depth_repair_check=depth_repair_check,
+        depth_device_verified=depth_device_verified,
     )
 
 

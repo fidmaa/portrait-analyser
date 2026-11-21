@@ -453,7 +453,7 @@ def test_16_bit_depth_without_macos_falls_back_and_explains_failure(
     monkeypatch.setattr(ios, "read_apple_depth", unavailable)
 
     with pytest.raises(NoDepthMapFound, match="imagecodecs reader") as excinfo:
-        ios.load_image(str(heic_face_image_path))
+        ios.load_image(str(heic_face_image_path), allow_unverified_device=True)
     assert isinstance(excinfo.value.__cause__, AppleDepthDecodeError)
     assert "not JPEG-coded" in str(excinfo.value)
 

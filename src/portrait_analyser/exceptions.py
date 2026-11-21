@@ -6,6 +6,30 @@ class NoDepthMapFound(Exception):
     pass
 
 
+class UnverifiedDepthDevice(NoDepthMapFound):
+    """The photo's 16-bit depth can only be read by the imagecodecs reader
+    here, and that reader has not been checked against Apple's for the
+    device that took the photo.
+
+    Raised by ``load_image`` where the macOS ImageIO/AVFoundation reader is
+    unavailable (Linux, Windows, macOS without pyobjc) and the EXIF model is
+    not in ``const.HEIF_DEPTH_VERIFIED_MODELS``. Another model may store its
+    depth differently, so the map could be decoded into wrong distances.
+    Pass ``allow_unverified_device=True`` to ``load_image`` to load anyway.
+
+    A subclass of :class:`NoDepthMapFound`, so callers that only handle that
+    still report the photo as unreadable.
+
+    :ivar model: EXIF ``Model`` of the photo, or ``None`` when absent.
+    :ivar software: EXIF ``Software`` (the iOS version), or ``None``.
+    """
+
+    def __init__(self, message, model=None, software=None):
+        super().__init__(message)
+        self.model = model
+        self.software = software
+
+
 class UnknownExtension(Exception):
     pass
 

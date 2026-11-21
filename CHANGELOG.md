@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `load_image` no longer reads 16-bit depth with the imagecodecs reader
+  (used where Apple's ImageIO/AVFoundation is unavailable: Linux, Windows,
+  macOS without pyobjc) for a device model that reader was not compared with
+  Apple's on. It raises `UnverifiedDepthDevice` (a `NoDepthMapFound`
+  subclass with `.model` / `.software`) instead; the verified models are
+  `const.HEIF_DEPTH_VERIFIED_MODELS`, currently only `iPhone 17 Pro`.
+  `load_image(..., allow_unverified_device=True)` loads such a photo anyway,
+  logs a warning and sets `portrait.depth_device_verified` to `False`
+  (`True` for a verified model, `None` when the check does not apply).
+  Nothing changes on macOS with pyobjc or for 8-bit depth maps.
+
 ## [0.10.1] - 2026-11-21
 
 ### Added

@@ -31,6 +31,7 @@ from .exceptions import (
     NoDepthMapFound,
     NoFacesDetected,
     UnknownExtension,
+    UnverifiedDepthDevice,
 )
 from .face import (
     Eye,
@@ -171,6 +172,7 @@ __all__ = [
     "NoFacesDetected",
     "Rectangle",
     "UnknownExtension",
+    "UnverifiedDepthDevice",
     "bilinear_sample",
     "compute_incisor_distance_3d",
     "compute_mouth_measurement_from_facemesh",

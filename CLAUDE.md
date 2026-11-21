@@ -33,7 +33,9 @@ There is no configured linter (no `[tool.ruff]` / pre-commit) — don't invent l
 - **16-bit lossless-JPEG depth** (original iPhone 17 Pro / iOS 26 captures): libheif cannot decode it on any
   platform. `ios.load_image` reads it via macOS ImageIO/AVFoundation (`apple_depth.py`) when available, else
   via `heif_depth.py` (raw `iloc` bytes + `imagecodecs` + the item's XMP `apdi:`/`depthData:` keys). Both return
-  `AppleDepthData`. Set `PORTRAIT_ANALYSER_16BIT_SAMPLES=<folder>` to run `tests/test_heif_depth.py` on real files;
+  `AppleDepthData`. The `heif_depth` path is only trusted for `const.HEIF_DEPTH_VERIFIED_MODELS` (iPhone 17 Pro:
+  97/97 photos identical to Apple's reader); for other models `load_image` raises `UnverifiedDepthDevice` unless
+  called with `allow_unverified_device=True`. Set `PORTRAIT_ANALYSER_16BIT_SAMPLES=<folder>` to run `tests/test_heif_depth.py` on real files;
   on macOS that also cross-checks the two readers pixel by pixel.
 
 ### Test fixtures

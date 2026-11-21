@@ -65,10 +65,19 @@ source type, intrinsics, orientation). The largest difference at any pixel is
 0.023 mm and the per-photo median is below 0.001 mm, at face distances of
 44-83 cm.
 
-Other iPhone models and iOS versions have not been checked. They may store
-depth differently, so outside macOS treat their depth as unverified until you
-have run the same comparison on your own photos (see the docstring of that
-script).
+Other iPhone models and iOS versions have not been checked, and they may
+store depth differently. Outside macOS `load_image` therefore raises
+`UnverifiedDepthDevice` for a 16-bit photo whose EXIF model is not in
+`const.HEIF_DEPTH_VERIFIED_MODELS` (currently only `iPhone 17 Pro`). To load
+it anyway:
+
+```python
+portrait = load_image("photo.heic", allow_unverified_device=True)
+portrait.depth_device_verified  # False: distances may be wrong
+```
+
+The check is by model only, not by iOS version. To verify another model, run
+the same comparison on its photos (see the docstring of that script).
 
 ## Supported versions
 
@@ -106,7 +115,7 @@ if portrait.skinmap is not None:
 
 ## API reference
 
-### `load_image(fileName, use_exif=True) -> IOSPortrait`
+### `load_image(fileName, use_exif=True, allow_unverified_device=False) -> IOSPortrait`
 
 Parses a HEIC/HEIF file and returns an `IOSPortrait` containing the photo, depth map, and Apple semantic segmentation masks. Validates TrueDepth EXIF data by default.
 

@@ -19,9 +19,13 @@ import numpy as np
 import pyheif
 import pytest
 
-from portrait_analyser import heif_depth, ios
+from portrait_analyser import const, heif_depth, ios
 from portrait_analyser.apple_depth import AppleDepthData
-from portrait_analyser.exceptions import AppleDepthDecodeError, AppleDepthUnavailable
+from portrait_analyser.exceptions import (
+    AppleDepthDecodeError,
+    AppleDepthUnavailable,
+    UnverifiedDepthDevice,
+)
 from portrait_analyser.heif_depth import (
     parse_depth_xmp,
     read_heif_depth,
@@ -312,12 +316,15 @@ def test_load_image_falls_back_to_heif_reader(monkeypatch, heic_face_image_path)
     monkeypatch.setattr(ios, "_load_pyheif_depth", heif_16_bit_error)
     monkeypatch.setattr(ios, "read_apple_depth", apple_unavailable)
     monkeypatch.setattr(ios, "read_heif_depth", fake_heif_reader)
+    # The fixture photo is an iPhone 14; pretend the reader was verified on it.
+    monkeypatch.setattr(const, "HEIF_DEPTH_VERIFIED_MODELS", frozenset({"iPhone 14"}))
 
     portrait = ios.load_image(str(heic_face_image_path))
 
     assert calls == [str(heic_face_image_path)]
     assert portrait.depth_accuracy == "absolute"
     assert portrait.depth_m.shape == (640, 480)  # rotated upright (orientation 6)
+    assert portrait.depth_device_verified is True
 
 
 def test_load_image_reports_heif_reader_failure(monkeypatch, heic_face_image_path):
@@ -335,7 +342,116 @@ def test_load_image_reports_heif_reader_failure(monkeypatch, heic_face_image_pat
     monkeypatch.setattr(ios, "read_heif_depth", broken)
 
     with pytest.raises(ios.NoDepthMapFound, match="imagecodecs reader.*boom"):
+        ios.load_image(str(heic_face_image_path), allow_unverified_device=True)
+
+
+# --------------------------------------------------------------------------
+# The imagecodecs reader is only trusted for the device models it was
+# compared with Apple's reader on
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def heif_reader_only(monkeypatch):
+    """16-bit depth, no macOS reader: load_image must use read_heif_depth.
+
+    Returns the list of paths the (fake) reader was called with.
+    """
+
+    def heif_16_bit_error(primary_image):
+        raise pyheif.error.HeifError(code=4, subcode=0, message="precision 16")
+
+    def apple_unavailable(path):
+        raise AppleDepthUnavailable("not macOS")
+
+    calls = []
+
+    def fake_heif_reader(path):
+        calls.append(path)
+        return AppleDepthData(
+            depth_m=np.full((480, 640), 0.5, dtype=np.float32),
+            accuracy="absolute",
+            filtered=False,
+            quality="high",
+            source_type="disparity",
+            intrinsics=None,
+            intrinsics_reference_size=None,
+            exif_orientation=6,
+        )
+
+    monkeypatch.setattr(ios, "_load_pyheif_depth", heif_16_bit_error)
+    monkeypatch.setattr(ios, "read_apple_depth", apple_unavailable)
+    monkeypatch.setattr(ios, "read_heif_depth", fake_heif_reader)
+    return calls
+
+
+def test_verified_models_are_the_compared_ones():
+    assert const.HEIF_DEPTH_VERIFIED_MODELS == frozenset({"iPhone 17 Pro"})
+
+
+def test_load_image_refuses_unverified_device(heif_reader_only, heic_face_image_path):
+    # The fixture photo was taken with an iPhone 14 (iOS 16.0).
+    with pytest.raises(UnverifiedDepthDevice, match="iPhone 14, iOS 16.0") as excinfo:
         ios.load_image(str(heic_face_image_path))
+
+    assert excinfo.value.model == "iPhone 14"
+    assert excinfo.value.software == "16.0"
+    assert "iPhone 17 Pro" in str(excinfo.value)
+    assert "allow_unverified_device=True" in str(excinfo.value)
+    assert isinstance(excinfo.value, ios.NoDepthMapFound)
+    assert heif_reader_only == []  # refused before decoding anything
+
+
+def test_load_image_allows_unverified_device_on_request(
+    heif_reader_only, heic_face_image_path, caplog
+):
+    with caplog.at_level("WARNING", logger="portrait_analyser.ios"):
+        portrait = ios.load_image(str(heic_face_image_path), allow_unverified_device=True)
+
+    assert heif_reader_only == [str(heic_face_image_path)]
+    assert portrait.depth_device_verified is False
+    assert "unverified device (iPhone 14, iOS 16.0)" in caplog.text
+
+
+def test_load_image_refuses_a_photo_without_exif_model(
+    heif_reader_only, heic_face_image_path, monkeypatch
+):
+    monkeypatch.setattr(ios, "_validate_exif", lambda primary_image, use_exif: (None, None))
+
+    with pytest.raises(UnverifiedDepthDevice, match="unknown model") as excinfo:
+        ios.load_image(str(heic_face_image_path))
+
+    assert excinfo.value.model is None
+
+
+def test_apple_reader_needs_no_device_check(monkeypatch, heic_face_image_path):
+    """On macOS Apple's own reader decodes the depth, for any model."""
+
+    def heif_16_bit_error(primary_image):
+        raise pyheif.error.HeifError(code=4, subcode=0, message="precision 16")
+
+    def apple_reader(path):
+        return AppleDepthData(
+            depth_m=np.full((480, 640), 0.5, dtype=np.float32),
+            accuracy="absolute",
+            filtered=False,
+            quality="high",
+            source_type="disparity",
+            intrinsics=None,
+            intrinsics_reference_size=None,
+            exif_orientation=6,
+        )
+
+    monkeypatch.setattr(ios, "_load_pyheif_depth", heif_16_bit_error)
+    monkeypatch.setattr(ios, "read_apple_depth", apple_reader)
+
+    portrait = ios.load_image(str(heic_face_image_path))
+
+    assert portrait.depth_device_verified is None
+
+
+def test_8_bit_depth_needs_no_device_check(heic_face_image_path):
+    assert ios.load_image(str(heic_face_image_path)).depth_device_verified is None
 
 
 # --------------------------------------------------------------------------
