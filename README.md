@@ -45,10 +45,25 @@ pip install portrait-analyser
 ### Platform-specific HEIF support
 
 - **macOS** -- works out of the box (uses `pyheif-iplweb`)
-- **Linux** -- requires system packages before installing:
-  ```bash
-  sudo apt install libheif-dev libde265-dev
-  ```
+- **Linux** -- works out of the box (uses the `pyheif>=0.8.0` manylinux wheel,
+  which bundles libheif; no system packages needed)
+
+### 16-bit depth maps (original iPhone `.HEIC` files)
+
+Recent iPhones store the portrait depth map as 16-bit lossless JPEG, which
+libheif cannot decode on any platform. On macOS `load_image` reads it with
+Apple's ImageIO/AVFoundation; elsewhere it reads the raw item bytes with
+`imagecodecs` and converts them to metres with the item's XMP metadata
+(`heif_depth.read_heif_depth`). Both paths return the same data.
+
+The two readers were compared pixel by pixel on 97 original 16-bit portraits
+(depth dumped on Linux x86_64, compared on macOS 26.5.2 arm64 with
+`scripts/compare_depth_readers.py`). All 97 agree: same shape, same
+invalid-pixel mask and same depth metadata (accuracy, quality, filtering,
+source type, intrinsics, orientation). The largest difference at any pixel is
+0.023 mm and the per-photo median is below 0.001 mm, at face distances of
+44-83 cm. To repeat the check on your own photos, see the docstring of that
+script.
 
 ## Supported versions
 

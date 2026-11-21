@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-21
+
 ### Added
 
 - `heif_depth.read_heif_depth`: cross-platform reader for 16-bit
@@ -17,6 +19,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `AppleDepthData` as the macOS reader. `load_image` uses it whenever the
   macOS ImageIO/AVFoundation reader is unavailable, so these photos now open
   on Linux.
+- `scripts/compare_depth_readers.py`: dumps the depth read on Linux and
+  compares it on macOS with Apple's ImageIO/AVFoundation reader, pixel by
+  pixel. Run on 97 original 16-bit portraits (Linux x86_64, libheif 1.18.2
+  vs macOS 26.5.2 arm64, libheif 1.23.7; `imagecodecs` 2026.10.10 on both):
+  all 97 agree -- same shape, same invalid-pixel mask, same accuracy /
+  quality / filtered / source type / intrinsics / orientation; the largest
+  difference at any pixel is 0.023 mm and the per-photo median is below
+  0.001 mm, at face distances of 44-83 cm.
 
 ### Changed
 
